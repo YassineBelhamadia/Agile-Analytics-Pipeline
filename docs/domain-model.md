@@ -52,9 +52,9 @@ erDiagram
     string reporter_id FK
     int story_points
     string status
-    date created
+    datetime created
     date duedate
-    date resolutiondate
+    datetime resolutiondate
   }
   STATUS_TRANSITION {
     string transition_id PK
@@ -93,6 +93,7 @@ Maps to `fields.*` on a Jira issue payload. Key points:
 - `parent_id` is self-referential and handles both Epic→Story and Story→Task/Bug links — a simplification of Jira's real split between `parent` (subtasks) and the Epic Link custom field, made deliberately for v1.
 - `story_points`: see the "Story points by issue type" decision below.
 - `status` here is the issue's **current** status (a denormalized convenience); the authoritative history lives in `STATUS_TRANSITION`.
+- `created` and `resolutiondate` are `datetime` (not `date`): they need full timestamp precision for cycle-time calculations, since `STATUS_TRANSITION.timestamp` is datetime-precision and Issue's own created/resolutiondate must match it or cycle-time math would silently lose precision. `duedate` stays `date`, since real Jira's duedate genuinely has no time component.
 
 ### STATUS_TRANSITION
 The fact-table grain. Maps to one entry in `changelog.histories[].items[]` where `field == "status"`. One row per status change, with a timestamp — this is what makes cycle-time and time-in-status questions answerable.

@@ -41,9 +41,11 @@ class Issue:
         reporter_id: Foreign key to the reporting User, or None.
         story_points: Story point estimate; not applicable for Epics.
         status: Current status of the issue.
-        created: Date the issue was created.
-        duedate: Due date for the issue, or None.
-        resolutiondate: Date the issue was resolved, or None.
+        created: Timestamp the issue was created.
+        duedate: Due date for the issue, or None. A real calendar date
+            with no time component in real Jira, unlike created/
+            resolutiondate.
+        resolutiondate: Timestamp the issue was resolved, or None.
     """
 
     issue_id: str
@@ -55,9 +57,9 @@ class Issue:
     reporter_id: str | None
     story_points: int | None
     status: str
-    created: date
+    created: datetime
     duedate: date | None
-    resolutiondate: date | None
+    resolutiondate: datetime | None
 
 
 @dataclass
