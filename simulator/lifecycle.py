@@ -2,10 +2,9 @@
 
 This is the first behavioural layer in the simulator: everything below it
 (clock.py, collector.py, the dataclasses) is passive infrastructure, and
-this module is what actually decides *when* things happen. It models a
-single issue in isolation — no resource contention, no competing issues,
-no sprint boundaries — so the shape of one ticket's lifecycle can be
-verified on its own before concurrency is layered on top.
+this module is what actually decides *when* things happen. It models one
+issue's path across the board; many such processes run concurrently and
+compete for a shared pool of developers.
 
 The workflow modelled is the common Jira-style board:
 
@@ -176,6 +175,7 @@ def issue_lifecycle(
     env: simpy.Environment,
     issue: Issue,
     collector: DataCollector,
+    dev_resource: simpy.Resource,
     author_ids: Sequence[str],
 ) -> Generator[simpy.Event, None, None]:
     """Drive one issue from To Do through to Done.
@@ -197,6 +197,29 @@ def issue_lifecycle(
     interesting. It is capped at MAX_QA_BOUNCES so no run can loop
     forever on an unlucky streak.
 
+    Only the In Progress phase consumes a developer from `dev_resource`.
+    To Do, Code Review and QA are left unconstrained in this block — a
+    deliberate scope decision, not an assertion that review and testing
+    are free. Modelling reviewer and QA pools as their own resources is a
+    later refinement; for now the single scarce resource is developer
+    time, which is the bottleneck that dominates real cycle times.
+
+    Because the In Progress transition is recorded before the developer
+    is acquired, an issue that arrives when every developer is busy waits
+    *in* In Progress rather than in To Do. That is deliberate and matches
+    how real boards behave — a ticket moved to In Progress by a busy
+    assignee accumulates In Progress time whether or not anyone is
+    actively typing — and it is precisely the signal that makes WIP and
+    queueing show up in cycle-time analytics.
+
+    This function must never be called with an Epic. Epics carry no
+    `story_points` (theirs is a rollup of their children, per the domain
+    model) and represent a body of work that is not itself coded,
+    reviewed or tested — only their child Stories, Tasks and Bugs move
+    through this state machine. Enforcing that is the caller's
+    responsibility (see arrivals.py); the assert below is a fail-fast
+    guard, not the enforcement point.
+
     Args:
         env: The SimPy environment driving the simulation clock.
         issue: The issue to move. Assumed to currently be in To Do, and to
@@ -204,18 +227,29 @@ def issue_lifecycle(
             worked through this process). Its `status` and
             `resolutiondate` are mutated in place as the process runs.
         collector: Accumulator receiving each StatusTransition.
+        dev_resource: Pool of developers. One slot is held for the
+            duration of each In Progress phase, including rework after a
+            QA bounce.
         author_ids: Candidate users who may perform the transitions; one
             is chosen at random per transition.
 
     Yields:
-        SimPy timeout events, one per status the issue passes through.
+        SimPy timeout and resource-request events as the issue advances.
     """
+    assert issue.story_points is not None, (
+        f"issue_lifecycle called with unpointed issue {issue.key} "
+        f"(issue_type={issue.issue_type!r}); Epics have no story_points and "
+        f"must not be run through the lifecycle state machine"
+    )
+
     yield env.timeout(_sample_todo_hours())
     _move(env, issue, collector, TODO, IN_PROGRESS, author_ids)
 
     bounces = 0
     while True:
-        yield env.timeout(_sample_in_progress_hours(issue.story_points))
+        with dev_resource.request() as req:
+            yield req
+            yield env.timeout(_sample_in_progress_hours(issue.story_points))
         _move(env, issue, collector, IN_PROGRESS, CODE_REVIEW, author_ids)
 
         yield env.timeout(_sample_code_review_hours())
@@ -256,7 +290,13 @@ if __name__ == "__main__":
         resolutiondate=None,
     )
 
-    env.process(issue_lifecycle(env, issue, collector, author_ids=["U-1", "U-2", "U-3"]))
+    # A single issue in isolation can never queue, so capacity is 1 here:
+    # contention is exercised from arrivals.py, not from this demo.
+    dev_resource = simpy.Resource(env, capacity=1)
+
+    env.process(
+        issue_lifecycle(env, issue, collector, dev_resource, author_ids=["U-1", "U-2", "U-3"])
+    )
     env.run()
 
     print(f"{issue.key} ({issue.issue_type}, {issue.story_points} points)")
