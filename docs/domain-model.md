@@ -17,11 +17,13 @@ erDiagram
   TEAM ||--o{ ISSUE : owns
   TEAM ||--o{ CAPACITY : "tracked for"
   SPRINT ||--o{ SPRINT_ISSUE_MEMBERSHIP : contains
+  SPRINT ||--o{ CAPACITY : "tracked for"
   ISSUE ||--o{ SPRINT_ISSUE_MEMBERSHIP : "assigned via"
   ISSUE ||--o{ STATUS_TRANSITION : has
   ISSUE ||--o{ ISSUE : "parent of"
   USER ||--o{ STATUS_TRANSITION : performs
   USER ||--o{ ISSUE : "assigned to"
+  USER ||--o{ ISSUE : "reported by"
 
   TEAM {
     string team_id PK
@@ -77,6 +79,22 @@ erDiagram
   }
 ```
 
+### Relationships in plain language
+
+This section says the same thing as the diagram above, in sentences — read this if the diagram's notation (`||--o{` etc.) isn't obvious at a glance. "One-to-many" below means: one row on the left can relate to many rows on the right, but each row on the right points back to exactly one row on the left.
+
+- **A TEAM has many USERs.** Every user belongs to exactly one team.
+- **A TEAM runs many SPRINTs.** A sprint belongs to exactly one team.
+- **A TEAM owns many ISSUEs.** Every issue belongs to exactly one team.
+- **A TEAM has many CAPACITY records over time** (one per sprint it runs).
+- **A SPRINT has many CAPACITY records** — in practice exactly one per sprint (a sprint's headcount/PTO snapshot), but modeled as one-to-many rather than one-to-one in case a later version wants to track a mid-sprint capacity correction.
+- **A SPRINT contains many issues, through SPRINT_ISSUE_MEMBERSHIP** — this is a *join table*: it doesn't link SPRINT directly to ISSUE, it links each one to a SPRINT_ISSUE_MEMBERSHIP row instead, because that row needs to carry its own extra fact (`added_at` — when the issue joined). The schema permits an issue to be a member of more than one sprint over its lifetime (e.g. rolling an unfinished ticket into the next sprint) — nothing currently prevents this — but no generator process creates that today; every issue in the current simulation belongs to at most one sprint. This is schema flexibility for a possible future extension, not current behavior. A sprint obviously contains many issues.
+- **An ISSUE has many STATUS_TRANSITIONs** — one row per status change (To Do → In Progress, In Progress → Code Review, etc.). This is the full history; `Issue.status` itself only ever holds the *current* status as a convenience.
+- **An ISSUE can be the parent of many other ISSUEs** — this is the Epic → Story and Story → Task/Bug relationship, and it points back to the *same* entity (a "self-relationship"). An issue has at most one parent, but a parent can have many children.
+- **A USER can perform many STATUS_TRANSITIONs** — this is "who moved this ticket," tracked via `author_id` on each transition row.
+- **A USER can be the assignee on many ISSUEs** — "who is currently working this ticket," via `Issue.assignee_id`.
+- **A USER can be the reporter on many ISSUEs** — "who originally filed this ticket," via `Issue.reporter_id`. This is a *separate* relationship from assignee — the same user can, and often does, show up as both the assignee on some issues and the reporter on others, but on any single issue those two fields can hold different users (or the same one).
+
 ## Entity notes
 
 ### TEAM (~ Jira Project)
@@ -90,7 +108,7 @@ Maps to the sprint object embedded in Jira's custom field array (e.g. `customfie
 
 ### ISSUE
 Maps to `fields.*` on a Jira issue payload. Key points:
-- `parent_id` is self-referential and handles both Epic→Story and Story→Task/Bug links — a simplification of Jira's real split between `parent` (subtasks) and the Epic Link custom field, made deliberately for v1.
+- `parent_id` is self-referential, modeling Jira's Epic Link concept — a simplification of Jira's real split between `parent` (subtasks) and the Epic Link custom field, made deliberately for v1. Currently only Epic→Story/Task/Bug links are generated (an Epic can be the parent of any issue type). Story→Task/Bug sub-linking (a Task belonging to a specific Story, independent of any Epic) is schema-supported — the field itself imposes no restriction — but no generator process creates this today; it's a possible future extension, not a current behavior.
 - `story_points`: see the "Story points by issue type" decision below.
 - `status` here is the issue's **current** status (a denormalized convenience); the authoritative history lives in `STATUS_TRANSITION`.
 - `created` and `resolutiondate` are `datetime` (not `date`): they need full timestamp precision for cycle-time calculations, since `STATUS_TRANSITION.timestamp` is datetime-precision and Issue's own created/resolutiondate must match it or cycle-time math would silently lose precision. `duedate` stays `date`, since real Jira's duedate genuinely has no time component.
@@ -102,7 +120,7 @@ The fact-table grain. Maps to one entry in `changelog.histories[].items[]` where
 Added during domain modeling — not in the original skeleton. Tracks when an issue joined a sprint (`added_at`). Without this, "committed vs. completed vs. scope-added" (business question inputs) cannot be computed: you'd only know an issue's current sprint, not whether it was there from day one or added mid-sprint. This is the internal equivalent of what Jira's Sprint Report computes on the fly.
 
 ### CAPACITY
-Deliberately connected only to `TEAM`, not to any Jira-side entity — see the ingestion note below.
+Tied to both TEAM and SPRINT — a capacity record is "this team, in this specific sprint, had this many people available" (`headcount`, `pto_days`). It's deliberately **not** connected to any Jira-side entity (Issue, StatusTransition, etc.) — see the ingestion note below for why it's ingested through a separate path from the Jira-shaped data, even though it relates to Team and Sprint just like the rest of the model.
 
 ## Story points by issue type (decision)
 
@@ -121,7 +139,9 @@ These numbers are **not** native fields on a Sprint object in real Jira — they
 
 - **Committed** = sum of `story_points` for issues where `SPRINT_ISSUE_MEMBERSHIP.added_at` is at/before sprint start
 - **Scope added** = sum of `story_points` for issues where `added_at` is after sprint start
-- **Completed** = sum of `story_points` for issues with a `STATUS_TRANSITION` to "Done" before sprint end
+- **Completed** = sum of `story_points` for issues whose `resolutiondate` is set and falls on or before sprint end. (In implementation, this reads the denormalized `Issue.resolutiondate` field directly rather than querying `STATUS_TRANSITION` history — equivalent in practice, since `resolutiondate` is only ever set at the same instant the "→ Done" transition is recorded, but worth naming accurately since it's a real implementation choice, not just a conceptual shorthand.)
+
+`sprint_report.py`'s actual output also includes `hit` (whether `completed >= committed` for that sprint — see the Block 5 decision log entry below) and a per-sprint bug count / total issue count, used for the bug-ratio business question. These aren't part of the three core formulas above but are computed alongside them.
 
 ## Ingestion split: Jira-shaped data vs. Capacity data (decision)
 
