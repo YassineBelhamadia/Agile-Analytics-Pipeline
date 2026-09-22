@@ -3,21 +3,26 @@
 lifecycle.py models what happens to an issue once it exists. This module
 models where issues come from: a continuous, irregular trickle of new
 work arriving at a team that has only so many developers to absorb it.
-Putting the two together is what produces the interesting behaviour —
-when arrivals outpace capacity, a backlog forms and cycle times stretch,
-which is exactly the effect the analytics pipeline downstream is meant to
-detect.
+
+Arrivals deliberately do not start any work. A newly filed issue lands in
+a shared backlog and sits there until something decides to pull it —
+which, in the full simulation, is sprint planning or a mid-sprint scope
+add (see sprint_cycle.py). That split matters: it is what makes the
+backlog a real queue with a real depth, and it is what allows commitment
+and scope creep to be modelled as decisions rather than as accidents of
+when a ticket happened to be filed.
 
 This module also introduces the Epic/Story hierarchy into the generated
-data for the first time. Epics arrive through the same stream as other
-work but are treated as a different kind of thing entirely: they are
-containers that later arrivals attach themselves to, not units of work
-that move across the board.
+data. Epics arrive through the same stream as other work but are treated
+as a different kind of thing entirely: they are containers that later
+arrivals attach themselves to, not units of work that move across the
+board, and they never enter the backlog.
 """
 
 from __future__ import annotations
 
 import random
+from collections import deque
 from collections.abc import Generator, Sequence
 
 import numpy as np
@@ -25,7 +30,8 @@ import simpy
 
 from simulator.clock import sim_to_real
 from simulator.collector import DataCollector
-from simulator.lifecycle import TODO, issue_lifecycle
+from simulator.issues import Issue
+from simulator.lifecycle import TODO
 from simulator.teams import Team
 
 EPIC = "Epic"
@@ -36,13 +42,18 @@ BUG = "Bug"
 ARRIVAL_RATE_PER_HOUR = 0.15
 """Mean number of new issues arriving per working hour.
 
-Chosen relative to what a small team can actually absorb. Over two
-ten-day sprints (160 working hours) this yields roughly 24 arrivals,
-while a three-developer team working issues of ~4 average story points
-can finish somewhere near 18 of them in the same window. Arrivals
-therefore run modestly ahead of throughput, so a backlog forms and
-queueing becomes visible without the simulation seizing up entirely —
-the realistic middle ground between an idle team and total gridlock.
+Chosen relative to what the team can actually absorb. Over one ten-day
+sprint (80 working hours) this yields roughly 12 arrivals, about 52 story
+points, against a four-developer team that delivers somewhere near 40
+points in the same window.
+
+Intake therefore runs deliberately ahead of throughput. That gap is the
+point: it keeps the backlog genuinely deep, which is what makes sprint
+planning a real decision (the team chooses what to pull) rather than a
+formality (the team takes whatever happens to have arrived). Set much
+lower and the backlog empties, planning stops binding, and the
+commitment-versus-capacity relationship the analytics exist to study
+disappears.
 """
 
 ISSUE_TYPE_WEIGHTS: dict[str, float] = {
@@ -110,12 +121,17 @@ def _sample_interarrival_hours() -> float:
     return float(np.random.exponential(1.0 / ARRIVAL_RATE_PER_HOUR))
 
 
-def _sample_issue_type() -> str:
-    """Pick an issue type according to ISSUE_TYPE_WEIGHTS."""
-    return random.choices(
-        list(ISSUE_TYPE_WEIGHTS),
-        weights=list(ISSUE_TYPE_WEIGHTS.values()),
-    )[0]
+def _sample_issue_type(weights: dict[str, float]) -> str:
+    """Pick an issue type according to the supplied weights.
+
+    The weights are a parameter rather than a module constant because the
+    active mix changes over the course of a run — a bug-incident sprint
+    swaps in a bug-heavy distribution (see sprint_cycle.py).
+
+    Args:
+        weights: Issue type to relative frequency. Need not sum to 1.
+    """
+    return random.choices(list(weights), weights=list(weights.values()))[0]
 
 
 def _sample_story_points() -> int:
@@ -146,9 +162,10 @@ def _pick_parent_epic(open_epics: Sequence[str]) -> str | None:
 def arrivals_process(
     env: simpy.Environment,
     team: Team,
-    dev_resource: simpy.Resource,
+    backlog: deque[Issue],
     collector: DataCollector,
     author_ids: Sequence[str],
+    weights_ref: dict[str, dict[str, float]],
 ) -> Generator[simpy.Event, None, None]:
     """Generate new issues for `team` for as long as the simulation runs.
 
@@ -157,28 +174,42 @@ def arrivals_process(
     of when the simulation ends; the caller bounds it with
     `env.run(until=...)`, which simply stops the clock mid-wait.
 
-    Epics are created but never started as lifecycle processes. This is
-    the important modelling decision in this module, and it is a
-    statement about what an Epic *is* rather than a shortcut. An Epic is
-    not a smaller or simpler unit of work — it is a container for other
-    issues. It has no story points of its own (its points are the rollup
-    of its children, per the domain model), so there is nothing to drive
-    an In Progress duration; and "code review" or "QA" have no meaning
-    applied to a body of work rather than a change. Giving Epics a
-    trivial or no-op lifecycle would be worse than excluding them: it
-    would emit status transitions that never happen in real Jira data and
-    would corrupt any cycle-time or throughput metric that reads the
-    transition table without filtering on issue type.
+    Nothing is started here. Non-Epic issues are appended to `backlog`
+    and wait to be pulled by whoever is deciding what to work on — in the
+    full simulation, sprint planning and mid-sprint scope adds. Arrivals
+    therefore have no opinion about capacity, sprints or scheduling, and
+    need no reference to the developer pool.
+
+    The active issue type mix is read from `weights_ref["current"]` on
+    every iteration rather than captured once. That indirection is the
+    entire coupling between this process and sprint planning: a bug
+    incident is triggered by another process swapping the dict entry, and
+    arrivals pick up the new mix on their next draw without knowing that
+    sprints, incidents, or sprint_cycle.py exist at all.
+
+    Epics are created but never enter the backlog. This is a statement
+    about what an Epic *is* rather than a shortcut. An Epic is not a
+    smaller or simpler unit of work — it is a container for other issues.
+    It has no story points of its own (its points are the rollup of its
+    children, per the domain model), so there is nothing to drive an In
+    Progress duration; and "code review" or "QA" have no meaning applied
+    to a body of work rather than a change. Giving Epics a trivial or
+    no-op lifecycle would be worse than excluding them: it would emit
+    status transitions that never happen in real Jira data and would
+    corrupt any cycle-time or throughput metric that reads the transition
+    table without filtering on issue type.
 
     Args:
         env: The SimPy environment driving the simulation clock.
         team: The team the generated issues belong to. Its `key` prefixes
             the generated issue keys.
-        dev_resource: Developer pool passed through to each issue's
-            lifecycle process.
+        backlog: Shared FIFO queue of unstarted work. Non-Epic issues are
+            appended here in creation order; the caller pulls from the
+            left to work oldest-first.
         collector: Accumulator receiving every issue created here.
-        author_ids: Candidate users to draw assignees, reporters and
-            transition authors from.
+        author_ids: Candidate users to draw assignees and reporters from.
+        weights_ref: Single-key dict holding the active issue type
+            weights under "current", re-read on each arrival.
 
     Yields:
         SimPy timeout events, one per gap between arrivals.
@@ -190,7 +221,7 @@ def arrivals_process(
         yield env.timeout(_sample_interarrival_hours())
 
         issue_number += 1
-        issue_type = _sample_issue_type()
+        issue_type = _sample_issue_type(weights_ref["current"])
         is_epic = issue_type == EPIC
 
         issue = collector.record_issue(
@@ -210,19 +241,18 @@ def arrivals_process(
         )
 
         if is_epic:
-            # No lifecycle process: an Epic has no story_points to drive an
+            # Never queued for work: an Epic has no story_points to drive an
             # In Progress duration, and code review and QA are meaningless
             # for a container of work. It exists only to be linked against.
             open_epics.append(issue.issue_id)
         else:
-            env.process(issue_lifecycle(env, issue, collector, dev_resource, author_ids))
+            backlog.append(issue)
 
 
 if __name__ == "__main__":
     from collections import Counter
 
     from simulator.clock import WORK_HOURS_PER_DAY, seed_all
-    from simulator.lifecycle import CODE_REVIEW, DONE, HOURS_PER_POINT, IN_PROGRESS
 
     DEMO_HEADCOUNT = 3
     SPRINT_LENGTH_DAYS = 10
@@ -244,12 +274,15 @@ if __name__ == "__main__":
         collector.record_user(user_id=f"U-{n}", display_name=f"Dev {n}", team_id=team.team_id)
     author_ids = [user.user_id for user in collector.users]
 
-    dev_resource = simpy.Resource(env, capacity=DEMO_HEADCOUNT)
-    env.process(arrivals_process(env, team, dev_resource, collector, author_ids))
+    # Standalone, nothing pulls from the backlog, so it only ever grows.
+    backlog: deque[Issue] = deque()
+    weights_ref: dict[str, dict[str, float]] = {"current": ISSUE_TYPE_WEIGHTS}
+
+    env.process(arrivals_process(env, team, backlog, collector, author_ids, weights_ref))
     env.run(until=RUN_HOURS)
 
     print(
-        f"{team.name} ({team.key}) — {DEMO_HEADCOUNT} devs, "
+        f"{team.name} ({team.key}) — intake only, no work started: "
         f"{SPRINTS_TO_RUN} sprints x {SPRINT_LENGTH_DAYS} days = {RUN_HOURS:.0f} working hours"
     )
     print()
@@ -267,36 +300,10 @@ if __name__ == "__main__":
     print(f"  standalone         {len(workable) - len(linked):>3}")
     print()
 
-    done = [issue for issue in workable if issue.status == DONE]
-    print(f"Transitions recorded: {len(collector.status_transitions)}")
-    print(f"Completed by cutoff:  {len(done)} of {len(workable)} (rest still in flight)")
-    print()
-
-    transitions_by_issue: dict[str, list] = {}
-    for transition in collector.status_transitions:
-        transitions_by_issue.setdefault(transition.issue_id, []).append(transition)
-
-    # An issue leaves To Do and enters In Progress in the same instant, so
-    # any wait for a free developer lands inside the In Progress span. Where
-    # that span runs well past the estimate, the excess is queueing.
-    print("Queueing: In Progress span vs. estimated work")
-    print(f"{'key':<8} {'pts':>3}  {'entered In Progress':<20} {'left In Progress':<20} {'est':>7}")
-    shown = 0
-    for issue in workable:
-        history = transitions_by_issue.get(issue.issue_id, [])
-        entered = next((t for t in history if t.to_status == IN_PROGRESS), None)
-        left = next((t for t in history if t.to_status == CODE_REVIEW), None)
-        if entered is None or left is None:
-            continue
-        print(
-            f"{issue.key:<8} {issue.story_points:>3}  "
-            f"{entered.timestamp:%Y-%m-%d %H:%M}     "
-            f"{left.timestamp:%Y-%m-%d %H:%M}     "
-            f"{issue.story_points * HOURS_PER_POINT:>5.0f}h"
-        )
-        shown += 1
-        if shown == 6:
-            break
+    backlog_points = sum(issue.story_points for issue in backlog)
+    print(f"Backlog depth at cutoff: {len(backlog)} issues, {backlog_points} points")
+    print(f"  (Epics are absent by design: {by_type[EPIC]} created, 0 queued)")
+    print(f"  oldest first: {[issue.key for issue in list(backlog)[:8]]}")
     print()
 
     print(collector.summary())
