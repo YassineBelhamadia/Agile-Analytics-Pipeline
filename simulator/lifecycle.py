@@ -38,12 +38,18 @@ QA = "QA"
 DONE = "Done"
 
 HOURS_PER_POINT = 5.0
-"""Working hours one story point nominally represents.
+"""Default working hours one story point nominally represents.
 
 This is the conversion that turns an abstract estimate into simulated
 time. It is the *estimate*, not the outcome — actual time spent is
 sampled around it, so a team's velocity can diverge from its estimates
 the way a real team's does.
+
+This is a **team-level tunable**, not a simulation-wide constant: how
+many hours a point really means is a property of how a particular team
+estimates, and teams differ (see personalities.py). The value here is the
+baseline default, used by this module's own demo. Every other caller
+passes its own value explicitly.
 """
 
 IN_PROGRESS_LOGNORMAL_SIGMA = 0.5
@@ -67,7 +73,14 @@ QA_MAX_HOURS = 8.0
 """Bounds on how long a ticket spends being tested in QA."""
 
 QA_BOUNCE_PROBABILITY = 0.15
-"""Chance that QA rejects a ticket and sends it back to In Progress."""
+"""Default chance that QA rejects a ticket and sends it back to In Progress.
+
+Like HOURS_PER_POINT, this is a **team-level tunable** rather than a
+simulation-wide constant — a team's bounce rate reflects its code quality
+and review rigour, which is exactly the kind of thing that differs
+between teams (see personalities.py). The value here is the baseline
+default, used by this module's own demo.
+"""
 
 MAX_QA_BOUNCES = 2
 """Hard cap on how many times one issue may bounce back from QA.
@@ -90,7 +103,7 @@ def _sample_todo_hours() -> float:
     return random.uniform(TODO_MIN_HOURS, TODO_MAX_HOURS)
 
 
-def _sample_in_progress_hours(story_points: int) -> float:
+def _sample_in_progress_hours(story_points: int, hours_per_point: float) -> float:
     """Sample actual hours of active work for an issue of `story_points`.
 
     The log-normal distribution is the key modelling choice here. Real
@@ -102,7 +115,7 @@ def _sample_in_progress_hours(story_points: int) -> float:
     likely as an on-time finish.
 
     The distribution is parameterised so its median is exactly
-    `story_points * HOURS_PER_POINT`: sampling `lognormal(mu, sigma)` with
+    `story_points * hours_per_point`: sampling `lognormal(mu, sigma)` with
     `mu = ln(base_hours)` yields a median of `base_hours`, so half of all
     tickets come in under estimate and half over, with the mean pulled
     above the estimate by the overrun tail. That mean-above-median gap is
@@ -113,11 +126,14 @@ def _sample_in_progress_hours(story_points: int) -> float:
         story_points: The issue's point estimate. Must not be None —
             Epics carry no points (their points are a rollup of children,
             per the domain model) and are not worked through this process.
+        hours_per_point: The owning team's hours-per-point conversion.
+            Passed in rather than read from the module constant, since
+            teams estimate differently.
 
     Returns:
         Hours of active work, always positive.
     """
-    base_hours = story_points * HOURS_PER_POINT
+    base_hours = story_points * hours_per_point
     return float(np.random.lognormal(mean=np.log(base_hours), sigma=IN_PROGRESS_LOGNORMAL_SIGMA))
 
 
@@ -177,6 +193,8 @@ def issue_lifecycle(
     collector: DataCollector,
     dev_resource: simpy.Resource,
     author_ids: Sequence[str],
+    hours_per_point: float,
+    qa_bounce_probability: float,
 ) -> Generator[simpy.Event, None, None]:
     """Drive one issue from To Do through to Done.
 
@@ -232,6 +250,11 @@ def issue_lifecycle(
             QA bounce.
         author_ids: Candidate users who may perform the transitions; one
             is chosen at random per transition.
+        hours_per_point: The owning team's hours-per-point conversion.
+        qa_bounce_probability: The owning team's chance of a QA rejection
+            on each pass. Both are per-team tunables rather than module
+            constants, so several teams with different characters can run
+            against the same code in one simulation.
 
     Yields:
         SimPy timeout and resource-request events as the issue advances.
@@ -249,14 +272,14 @@ def issue_lifecycle(
     while True:
         with dev_resource.request() as req:
             yield req
-            yield env.timeout(_sample_in_progress_hours(issue.story_points))
+            yield env.timeout(_sample_in_progress_hours(issue.story_points, hours_per_point))
         _move(env, issue, collector, IN_PROGRESS, CODE_REVIEW, author_ids)
 
         yield env.timeout(_sample_code_review_hours())
         _move(env, issue, collector, CODE_REVIEW, QA, author_ids)
 
         yield env.timeout(_sample_qa_hours())
-        if bounces < MAX_QA_BOUNCES and random.random() < QA_BOUNCE_PROBABILITY:
+        if bounces < MAX_QA_BOUNCES and random.random() < qa_bounce_probability:
             bounces += 1
             _move(env, issue, collector, QA, IN_PROGRESS, author_ids)
             continue
@@ -295,7 +318,15 @@ if __name__ == "__main__":
     dev_resource = simpy.Resource(env, capacity=1)
 
     env.process(
-        issue_lifecycle(env, issue, collector, dev_resource, author_ids=["U-1", "U-2", "U-3"])
+        issue_lifecycle(
+            env,
+            issue,
+            collector,
+            dev_resource,
+            author_ids=["U-1", "U-2", "U-3"],
+            hours_per_point=HOURS_PER_POINT,
+            qa_bounce_probability=QA_BOUNCE_PROBABILITY,
+        )
     )
     env.run()
 

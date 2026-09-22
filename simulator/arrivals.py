@@ -40,7 +40,12 @@ TASK = "Task"
 BUG = "Bug"
 
 ARRIVAL_RATE_PER_HOUR = 0.15
-"""Mean number of new issues arriving per working hour.
+"""Default mean number of new issues arriving per working hour.
+
+A **team-level tunable**, not a simulation-wide constant: intake volume
+is a property of a particular team's remit and traffic (see
+personalities.py). The value here is the baseline default, used by this
+module's own demo; every other caller passes its own value explicitly.
 
 Chosen relative to what the team can actually absorb. Over one ten-day
 sprint (80 working hours) this yields roughly 12 arrivals, about 52 story
@@ -62,7 +67,12 @@ ISSUE_TYPE_WEIGHTS: dict[str, float] = {
     BUG: 0.22,
     EPIC: 0.08,
 }
-"""Relative frequency of each issue type among arrivals.
+"""Default relative frequency of each issue type among arrivals.
+
+A **team-level tunable** — a team maintaining a fragile legacy service
+sees a very different bug share from one building something new (see
+personalities.py). This is the baseline default, used by this module's
+own demo.
 
 Stories dominate as the primary unit of planned work, with tasks and bugs
 together making up roughly half of the remainder — a bug share in the low
@@ -101,7 +111,7 @@ points is what ARRIVAL_RATE_PER_HOUR was calibrated against.
 """
 
 
-def _sample_interarrival_hours() -> float:
+def _sample_interarrival_hours(arrival_rate_per_hour: float) -> float:
     """Sample the gap in working hours until the next issue arrives.
 
     Exponentially distributed gaps are the standard model for arrivals
@@ -117,8 +127,11 @@ def _sample_interarrival_hours() -> float:
     sized to the average load would never fall behind, and the queueing
     and backlog effects this simulation exists to produce would largely
     disappear.
+
+    Args:
+        arrival_rate_per_hour: The team's mean arrivals per working hour.
     """
-    return float(np.random.exponential(1.0 / ARRIVAL_RATE_PER_HOUR))
+    return float(np.random.exponential(1.0 / arrival_rate_per_hour))
 
 
 def _sample_issue_type(weights: dict[str, float]) -> str:
@@ -166,6 +179,8 @@ def arrivals_process(
     collector: DataCollector,
     author_ids: Sequence[str],
     weights_ref: dict[str, dict[str, float]],
+    arrival_rate_per_hour: float,
+    issue_type_weights: dict[str, float],
 ) -> Generator[simpy.Event, None, None]:
     """Generate new issues for `team` for as long as the simulation runs.
 
@@ -186,6 +201,13 @@ def arrivals_process(
     incident is triggered by another process swapping the dict entry, and
     arrivals pick up the new mix on their next draw without knowing that
     sprints, incidents, or sprint_cycle.py exist at all.
+
+    This process seeds `weights_ref` from its own `issue_type_weights`
+    before its first arrival, writing both `"current"` (the mix in force
+    right now) and `"base"` (the team's normal mix, which sprint planning
+    reverts to once an incident sprint ends). Seeding here rather than at
+    the call site keeps the team's mix in one place, and is safe because
+    sprint planning waits out a backlog warmup before it reads either key.
 
     Epics are created but never enter the backlog. This is a statement
     about what an Epic *is* rather than a shortcut. An Epic is not a
@@ -208,24 +230,32 @@ def arrivals_process(
             left to work oldest-first.
         collector: Accumulator receiving every issue created here.
         author_ids: Candidate users to draw assignees and reporters from.
-        weights_ref: Single-key dict holding the active issue type
-            weights under "current", re-read on each arrival.
+        weights_ref: Shared dict holding the active issue type weights
+            under "current" (re-read on each arrival) and the team's
+            normal mix under "base". Populated here at process start.
+        arrival_rate_per_hour: The team's mean arrivals per working hour.
+        issue_type_weights: The team's normal issue type mix.
 
     Yields:
         SimPy timeout events, one per gap between arrivals.
     """
+    weights_ref["base"] = issue_type_weights
+    weights_ref["current"] = issue_type_weights
+
     open_epics: list[str] = []
     issue_number = 0
 
     while True:
-        yield env.timeout(_sample_interarrival_hours())
+        yield env.timeout(_sample_interarrival_hours(arrival_rate_per_hour))
 
         issue_number += 1
         issue_type = _sample_issue_type(weights_ref["current"])
         is_epic = issue_type == EPIC
 
         issue = collector.record_issue(
-            issue_id=f"I-{issue_number}",
+            # Namespaced by team key: several teams share one DataCollector,
+            # and their per-process counters both start at 1.
+            issue_id=f"{team.key}-I-{issue_number}",
             key=f"{team.key}-{issue_number}",
             issue_type=issue_type,
             team_id=team.team_id,
@@ -276,9 +306,21 @@ if __name__ == "__main__":
 
     # Standalone, nothing pulls from the backlog, so it only ever grows.
     backlog: deque[Issue] = deque()
-    weights_ref: dict[str, dict[str, float]] = {"current": ISSUE_TYPE_WEIGHTS}
+    # Populated by arrivals_process itself from the weights passed below.
+    weights_ref: dict[str, dict[str, float]] = {}
 
-    env.process(arrivals_process(env, team, backlog, collector, author_ids, weights_ref))
+    env.process(
+        arrivals_process(
+            env,
+            team,
+            backlog,
+            collector,
+            author_ids,
+            weights_ref,
+            arrival_rate_per_hour=ARRIVAL_RATE_PER_HOUR,
+            issue_type_weights=ISSUE_TYPE_WEIGHTS,
+        )
+    )
     env.run(until=RUN_HOURS)
 
     print(

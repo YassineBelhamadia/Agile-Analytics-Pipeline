@@ -162,3 +162,15 @@ Sprint planning releases all committed work simultaneously at sprint start, rath
 
 - Exact Sprint Report field names (Jira Software API) — verify later if fidelity matters for the mock API's sprint-report endpoint.
 - Whether `reporter_id` and `priority` are worth modeling for v1 — currently included in the schema for realism but not required by any of the six confirmed business questions.
+
+## Multi-team personality parameterization (decision)
+
+## Multi-team personality parameterization (decision)
+
+Teams are not identical. The simulator allows **per-team parameterization** of core behaviors: `hours_per_point`, `qa_bounce_probability`, `arrival_rate_per_hour`, `issue_type_weights`, PTO distribution, `capacity_realization_factor`, and optimism range. This enables three distinct personas:
+
+- **Phoenix** (headcount=5): high velocity (3.5 hrs/point), high bug rate (~28% of arrivals), high QA rework (22%), aggressive capacity commitment (crf=0.42). Result: 38% sprint hit rate, 186 issues completed over 52 weeks — ships the most, misses the most.
+- **Atlas** (headcount=3): slow (6.0 hrs/point), reliable (8% QA rework, 15% bugs), conservative commitment (crf=0.28, optimism factor 1.00–1.08). Result: 74% hit rate, 66 issues completed — small commitments met consistently.
+- **Nomad** (headcount=4): moderate velocity (5.0 hrs/point), high PTO variance (37% chance of high-PTO sprint, 3.7 avg. days/sprint vs. 1–1.4 for others). Result: 48% hit rate, 100 issues completed — unpredictable sprint-to-sprint due to capacity shocks.
+
+**Observed quirk (documented, not fixed):** Atlas's small total commitment per sprint (~11 story points) makes individual bad tickets disproportionately impactful. Hit rate variance across seeds is ~24 percentage points (33%–100%), vs. ~18 points for Phoenix and Nomad. Realistic for small teams where one slip cascades — leaving crf at 0.28 per design choice rather than smoothing to 0.32–0.34, which would reduce variance but lose realism.

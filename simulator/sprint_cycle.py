@@ -32,16 +32,20 @@ from collections.abc import Generator, Sequence
 import numpy as np
 import simpy
 
-from simulator.arrivals import BUG, ISSUE_TYPE_WEIGHTS
+from simulator.arrivals import ARRIVAL_RATE_PER_HOUR, BUG, ISSUE_TYPE_WEIGHTS
 from simulator.clock import WORK_HOURS_PER_DAY, sim_to_real
 from simulator.collector import DataCollector
 from simulator.issues import Issue
-from simulator.lifecycle import HOURS_PER_POINT, issue_lifecycle
+from simulator.lifecycle import HOURS_PER_POINT, QA_BOUNCE_PROBABILITY, issue_lifecycle
 from simulator.sprints import Sprint
 from simulator.teams import Team
 
 HEADCOUNT = 4
-"""Developers on the team, and the fixed capacity of the shared resource.
+"""Default developers on a team, and the capacity of its resource pool.
+
+A **team-level tunable**, not a simulation-wide constant (see
+personalities.py). This is the baseline default, used by this module's
+own single-team demo.
 
 Small enough that one person's absence is a visible fraction of capacity
 (a quarter), which is what makes PTO matter to sprint outcomes rather
@@ -67,7 +71,11 @@ unrepresentative of every sprint that follows.
 """
 
 AVERAGE_PTO_DAYS_PER_SPRINT = 1.5
-"""Typical PTO days per sprint, used *only* to size the commitment.
+"""Default typical PTO days per sprint, used *only* to size the commitment.
+
+A **team-level tunable** (see personalities.py): some teams are far more
+absence-prone than others, and that is one of the clearest drivers of
+differing delivery. This is the baseline default for this module's demo.
 
 This is the team's planning assumption, not the PTO that actually
 happens: the real draw comes from `_sample_pto_days` and is usually
@@ -81,23 +89,41 @@ there would be nothing for a capacity-versus-velocity analysis to find.
 """
 
 LOW_PTO_RANGE = (0.0, 2.0)
-"""Normal-sprint PTO range in days: the odd day off, nothing coordinated."""
+"""Default normal-sprint PTO range in days: the odd day off, uncoordinated.
+
+A **team-level tunable** (see personalities.py); this is the baseline
+default for this module's own demo.
+"""
 
 HIGH_PTO_RANGE = (4.0, 6.0)
-"""Heavy-absence PTO range in days: a holiday cluster or extended leave."""
+"""Default heavy-absence PTO range in days: a holiday cluster or long leave.
+
+A **team-level tunable** (see personalities.py); this is the baseline
+default for this module's own demo.
+"""
 
 HIGH_PTO_SPRINT_PROBABILITY = 0.2
-"""Chance a sprint draws from HIGH_PTO_RANGE instead of LOW_PTO_RANGE.
+"""Default chance a sprint draws from the heavy regime, not the normal one.
 
 Roughly one sprint in five. Absence is not smoothly distributed in real
 teams — it clumps around public holidays, school breaks and planned
 leave. A single unimodal distribution would smear those clumps into a
 gentle wobble; a two-regime draw keeps the occasional genuinely
 short-staffed sprint that makes the capacity signal legible.
+
+All three of these are **team-level tunables**, because how often a team
+is actually short-staffed is one of its defining characteristics — and
+critically, they govern the absence that *happens*, which is a separate
+thing from AVERAGE_PTO_DAYS_PER_SPRINT, the absence a team *plans for*.
+A team whose two differ is a team that will be repeatedly surprised.
 """
 
 CAPACITY_REALIZATION_FACTOR = 0.35
-"""Fraction of nominal point-capacity the team can actually commit to.
+"""Default fraction of nominal point-capacity a team can commit to.
+
+A **team-level tunable** (see personalities.py) — a team with
+predictable execution realizes more of its raw capacity than a chaotic
+one. This is the baseline default for this module's demo.
 
 Raw capacity math — developer hours divided by HOURS_PER_POINT — badly
 over-predicts what a sprint can deliver, because HOURS_PER_POINT is the
@@ -130,7 +156,11 @@ optimistic one.
 """
 
 OPTIMISM_FACTOR_RANGE = (1.05, 1.15)
-"""Multiplier applied to baseline capacity when committing, sampled per sprint.
+"""Default over-commitment multiplier, sampled per sprint.
+
+A **team-level tunable** (see personalities.py): how much a team
+over-promises, and how consistently, is one of its defining traits. This
+is the baseline default for this module's demo.
 
 Teams reliably commit to slightly more than they can deliver. The
 planning fallacy is one of the most robust findings in software
@@ -151,20 +181,34 @@ the intake stream rather than through planning.
 INCIDENT_BUG_SHARE = 0.40
 """Bug share of arrivals during an incident sprint, up from the usual 22%."""
 
-INCIDENT_ISSUE_TYPE_WEIGHTS: dict[str, float] = {
-    issue_type: (
-        INCIDENT_BUG_SHARE
-        if issue_type == BUG
-        else weight * (1.0 - INCIDENT_BUG_SHARE) / (1.0 - ISSUE_TYPE_WEIGHTS[BUG])
-    )
-    for issue_type, weight in ISSUE_TYPE_WEIGHTS.items()
-}
-"""Issue type mix during a bug-incident sprint.
+def incident_weights(base_weights: dict[str, float]) -> dict[str, float]:
+    """Derive a bug-incident issue mix from a team's normal mix.
 
-Derived from the base weights rather than written out, so the two stay in
-sync if the base mix is retuned. Bugs rise to INCIDENT_BUG_SHARE and
-every other type is scaled down proportionally, preserving their
-relative proportions and keeping the total at 1.0.
+    Bugs rise to INCIDENT_BUG_SHARE and every other type is scaled down
+    proportionally, preserving their relative proportions and keeping the
+    total at 1.0. Derived from the team's own weights rather than written
+    out, so each team's incident sprints stay recognizably that team's —
+    a team whose normal mix is already bug-heavy shifts less far than one
+    building mostly new features.
+
+    Args:
+        base_weights: The team's normal issue type mix.
+
+    Returns:
+        A new mix with Bug at INCIDENT_BUG_SHARE.
+    """
+    non_bug_scale = (1.0 - INCIDENT_BUG_SHARE) / (1.0 - base_weights[BUG])
+    return {
+        issue_type: (INCIDENT_BUG_SHARE if issue_type == BUG else weight * non_bug_scale)
+        for issue_type, weight in base_weights.items()
+    }
+
+
+INCIDENT_ISSUE_TYPE_WEIGHTS: dict[str, float] = incident_weights(ISSUE_TYPE_WEIGHTS)
+"""Bug-incident mix derived from the default arrival weights.
+
+The baseline default for this module's own demo; each team in a
+multi-team run derives its own from its personality's weights.
 """
 
 SCOPE_ADD_POISSON_MEAN = 2.0
@@ -179,16 +223,29 @@ shape and would need retuning whenever the mean changed.
 """
 
 
-def _sample_pto_days() -> float:
-    """Draw this sprint's actual PTO days from one of two regimes.
+def _sample_pto_days(
+    high_pto_probability: float,
+    low_pto_range: tuple[float, float],
+    high_pto_range: tuple[float, float],
+) -> float:
+    """Draw this sprint's actual PTO days from one of the team's two regimes.
+
+    This is the absence that actually occurs, drawn from the team's own
+    distribution — not `average_pto_days_per_sprint`, which is only what
+    the team assumed when sizing its commitment.
+
+    Args:
+        high_pto_probability: Chance this sprint lands in the heavy
+            regime rather than the normal one.
+        low_pto_range: Day bounds for a normal sprint.
+        high_pto_range: Day bounds for a heavy-absence sprint.
 
     Returns:
-        Days of PTO, from HIGH_PTO_RANGE with probability
-        HIGH_PTO_SPRINT_PROBABILITY, otherwise from LOW_PTO_RANGE.
+        Days of PTO actually taken by the team this sprint.
     """
-    if random.random() < HIGH_PTO_SPRINT_PROBABILITY:
-        return random.uniform(*HIGH_PTO_RANGE)
-    return random.uniform(*LOW_PTO_RANGE)
+    if random.random() < high_pto_probability:
+        return random.uniform(*high_pto_range)
+    return random.uniform(*low_pto_range)
 
 
 def pto_process(
@@ -244,6 +301,8 @@ def scope_add_issue_process(
     dev_resource: simpy.Resource,
     collector: DataCollector,
     author_ids: Sequence[str],
+    hours_per_point: float,
+    qa_bounce_probability: float,
 ) -> Generator[simpy.Event, None, None]:
     """Pull one extra issue into an already-committed sprint.
 
@@ -266,6 +325,9 @@ def scope_add_issue_process(
         dev_resource: The shared developer pool, passed to the lifecycle.
         collector: Accumulator receiving the membership row.
         author_ids: Candidate users for the issue's transitions.
+        hours_per_point: The team's hours-per-point conversion, passed
+            through to the issue's lifecycle.
+        qa_bounce_probability: The team's QA rejection rate, likewise.
 
     Yields:
         A timeout for the offset.
@@ -281,7 +343,17 @@ def scope_add_issue_process(
         sprint_id=sprint.sprint_id,
         added_at=sim_to_real(env.now),
     )
-    env.process(issue_lifecycle(env, issue, collector, dev_resource, author_ids))
+    env.process(
+        issue_lifecycle(
+            env,
+            issue,
+            collector,
+            dev_resource,
+            author_ids,
+            hours_per_point,
+            qa_bounce_probability,
+        )
+    )
 
 
 def sprint_cycle_process(
@@ -293,6 +365,15 @@ def sprint_cycle_process(
     author_ids: Sequence[str],
     weights_ref: dict[str, dict[str, float]],
     num_sprints: int,
+    headcount: int,
+    average_pto_days_per_sprint: float,
+    optimism_factor_range: tuple[float, float],
+    capacity_realization_factor: float,
+    hours_per_point: float,
+    qa_bounce_probability: float,
+    high_pto_probability: float,
+    low_pto_range: tuple[float, float],
+    high_pto_range: tuple[float, float],
 ) -> Generator[simpy.Event, None, None]:
     """Run `num_sprints` consecutive sprints for one team.
 
@@ -303,8 +384,8 @@ def sprint_cycle_process(
     and advance to the next boundary.
 
     The commitment is sized against *average* capacity
-    (AVERAGE_PTO_DAYS_PER_SPRINT), never against the PTO actually drawn
-    for this sprint, then scaled by CAPACITY_REALIZATION_FACTOR and
+    (`average_pto_days_per_sprint`), never against the PTO actually drawn
+    for this sprint, then scaled by `capacity_realization_factor` and
     inflated by a sampled optimism factor. The team is therefore always
     committing slightly beyond a realistic baseline — and in a sprint
     that draws heavy absence, it is committing to work that cannot fit.
@@ -322,21 +403,47 @@ def sprint_cycle_process(
         collector: Accumulator receiving sprints, capacities and
             memberships.
         author_ids: Candidate users for assignees and transition authors.
-        weights_ref: Single-key dict whose "current" entry this process
-            swaps to steer the arrival mix during incident sprints.
+        weights_ref: Shared dict whose "current" entry this process swaps
+            to steer the arrival mix during incident sprints, reverting
+            to the team's own "base" mix afterwards. Both keys are
+            populated by arrivals_process before the warmup below
+            elapses.
         num_sprints: How many sprints to run.
+        headcount: Developers on the team; also the capacity of
+            `dev_resource`, recorded on each Capacity row.
+        average_pto_days_per_sprint: The team's *planning assumption*
+            about absence, used only to size commitments.
+        optimism_factor_range: Bounds on the team's per-sprint
+            over-commitment multiplier.
+        capacity_realization_factor: Fraction of nominal point-capacity
+            the team can realistically commit to.
+        hours_per_point: The team's hours-per-point conversion.
+        qa_bounce_probability: The team's QA rejection rate.
+        high_pto_probability: Chance any given sprint lands in the team's
+            heavy-absence regime.
+        low_pto_range: Day bounds for a normal sprint's absence.
+        high_pto_range: Day bounds for a heavy-absence sprint. These three
+            govern the absence that actually happens, as opposed to
+            `average_pto_days_per_sprint`, which is only what the team
+            assumed at planning time.
 
     Yields:
         The warmup timeout, then one sprint-length timeout per sprint.
     """
     yield env.timeout(BACKLOG_WARMUP_HOURS)
 
+    # Safe to read now: arrivals_process seeded both keys at time zero,
+    # and the warmup above has since elapsed.
+    base_weights = weights_ref["base"]
+    team_incident_weights = incident_weights(base_weights)
+
     for sprint_number in range(1, num_sprints + 1):
-        pto_days = _sample_pto_days()
+        pto_days = _sample_pto_days(high_pto_probability, low_pto_range, high_pto_range)
         sprint_start = sim_to_real(env.now)
 
         sprint = collector.record_sprint(
-            sprint_id=f"S-{sprint_number}",
+            # Namespaced by team key for the same reason issue_id is.
+            sprint_id=f"{team.key}-S-{sprint_number}",
             team_id=team.team_id,
             name=f"Sprint {sprint_number}",
             state="closed",
@@ -349,7 +456,7 @@ def sprint_cycle_process(
         collector.record_capacity(
             team_id=team.team_id,
             sprint_id=sprint.sprint_id,
-            headcount=HEADCOUNT,
+            headcount=headcount,
             pto_days=pto_days,
         )
 
@@ -364,14 +471,14 @@ def sprint_cycle_process(
             )
 
         is_incident = random.random() < BUG_INCIDENT_SPRINT_PROBABILITY
-        weights_ref["current"] = INCIDENT_ISSUE_TYPE_WEIGHTS if is_incident else ISSUE_TYPE_WEIGHTS
+        weights_ref["current"] = team_incident_weights if is_incident else base_weights
 
-        optimism = random.uniform(*OPTIMISM_FACTOR_RANGE)
+        optimism = random.uniform(*optimism_factor_range)
         baseline_available_hours = (
-            HEADCOUNT * SPRINT_LENGTH_HOURS - AVERAGE_PTO_DAYS_PER_SPRINT * WORK_HOURS_PER_DAY
+            headcount * SPRINT_LENGTH_HOURS - average_pto_days_per_sprint * WORK_HOURS_PER_DAY
         )
         committed_target_points = (
-            baseline_available_hours / HOURS_PER_POINT * CAPACITY_REALIZATION_FACTOR * optimism
+            baseline_available_hours / hours_per_point * capacity_realization_factor * optimism
         )
 
         # Greedy FIFO planning: keep pulling the oldest waiting issue until
@@ -385,7 +492,17 @@ def sprint_cycle_process(
                 sprint_id=sprint.sprint_id,
                 added_at=sprint_start,
             )
-            env.process(issue_lifecycle(env, issue, collector, dev_resource, author_ids))
+            env.process(
+                issue_lifecycle(
+                    env,
+                    issue,
+                    collector,
+                    dev_resource,
+                    author_ids,
+                    hours_per_point,
+                    qa_bounce_probability,
+                )
+            )
             committed_points += issue.story_points
 
         for _ in range(int(np.random.poisson(SCOPE_ADD_POISSON_MEAN))):
@@ -398,6 +515,8 @@ def sprint_cycle_process(
                     dev_resource=dev_resource,
                     collector=collector,
                     author_ids=author_ids,
+                    hours_per_point=hours_per_point,
+                    qa_bounce_probability=qa_bounce_probability,
                 )
             )
 
@@ -427,13 +546,25 @@ if __name__ == "__main__":
     author_ids = [user.user_id for user in collector.users]
 
     backlog: deque[Issue] = deque()
-    weights_ref: dict[str, dict[str, float]] = {"current": ISSUE_TYPE_WEIGHTS}
+    # Populated by arrivals_process from the weights passed to it below.
+    weights_ref: dict[str, dict[str, float]] = {}
 
     # One pool for the whole run. PTO occupies slots in it; it is never
     # resized, so work in flight across a sprint boundary is unaffected.
     dev_resource = simpy.Resource(env, capacity=HEADCOUNT)
 
-    env.process(arrivals_process(env, team, backlog, collector, author_ids, weights_ref))
+    env.process(
+        arrivals_process(
+            env,
+            team,
+            backlog,
+            collector,
+            author_ids,
+            weights_ref,
+            arrival_rate_per_hour=ARRIVAL_RATE_PER_HOUR,
+            issue_type_weights=ISSUE_TYPE_WEIGHTS,
+        )
+    )
     env.process(
         sprint_cycle_process(
             env,
@@ -444,6 +575,15 @@ if __name__ == "__main__":
             author_ids,
             weights_ref,
             num_sprints=NUM_SPRINTS,
+            headcount=HEADCOUNT,
+            average_pto_days_per_sprint=AVERAGE_PTO_DAYS_PER_SPRINT,
+            optimism_factor_range=OPTIMISM_FACTOR_RANGE,
+            capacity_realization_factor=CAPACITY_REALIZATION_FACTOR,
+            hours_per_point=HOURS_PER_POINT,
+            qa_bounce_probability=QA_BOUNCE_PROBABILITY,
+            high_pto_probability=HIGH_PTO_SPRINT_PROBABILITY,
+            low_pto_range=LOW_PTO_RANGE,
+            high_pto_range=HIGH_PTO_RANGE,
         )
     )
     env.run(until=BACKLOG_WARMUP_HOURS + NUM_SPRINTS * SPRINT_LENGTH_HOURS)
