@@ -19,6 +19,7 @@ projects this ground truth into Jira-shaped API responses.
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 
 from simulator.capacity import Capacity
@@ -26,6 +27,9 @@ from simulator.issues import Issue, StatusTransition
 from simulator.sprints import Sprint, SprintIssueMembership
 from simulator.teams import Team
 from simulator.users import User
+
+_TRANSITION_ID_SUFFIX = re.compile(r"(\d+)$")
+"""Extracts the counter value back out of an ID minted by this module."""
 
 
 class DataCollector:
@@ -66,6 +70,35 @@ class DataCollector:
         transition_id = f"TR-{self._next_transition_id}"
         self._next_transition_id += 1
         return transition_id
+
+    def resume_transition_counter(self) -> None:
+        """Advance the transition-ID counter past the transitions already held.
+
+        A collector normally mints IDs from a counter that starts at 1,
+        which is correct for a fresh simulation run. It is wrong for a
+        collector populated from somewhere else — reloaded from disk, say
+        — because the counter would still be at 1 while `TR-1` already
+        exists, and the next recorded transition would duplicate it.
+
+        Call this after filling `status_transitions` by any route other
+        than `record_transition`. It reads the transitions the collector
+        already holds rather than taking them as an argument, so there is
+        no way to resume against a list that isn't the one being
+        continued.
+
+        Parsing the counter back out of the ID string belongs here
+        because this class is what put it there: `_generate_transition_id`
+        defines the format, and nothing outside this module should need
+        to know it. IDs that don't end in digits are skipped rather than
+        treated as errors — the counter only has to clear what is
+        present, not account for every way an ID might have been formed.
+        """
+        highest = 0
+        for transition in self.status_transitions:
+            match = _TRANSITION_ID_SUFFIX.search(transition.transition_id)
+            if match:
+                highest = max(highest, int(match.group(1)))
+        self._next_transition_id = highest + 1
 
     def record_team(self, team_id: str, key: str, name: str, base_headcount: int) -> Team:
         """Construct a Team and append it to `teams`."""

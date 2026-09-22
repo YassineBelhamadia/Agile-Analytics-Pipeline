@@ -23,14 +23,22 @@ from typing import TYPE_CHECKING
 import simpy
 
 from simulator.arrivals import arrivals_process
+from simulator.clock import seed_all
 from simulator.collector import DataCollector
 from simulator.issues import Issue
-from simulator.personalities import TeamPersonality
-from simulator.sprint_cycle import sprint_cycle_process
+from simulator.personalities import ALL_PERSONALITIES, TeamPersonality
+from simulator.sprint_cycle import (
+    BACKLOG_WARMUP_HOURS,
+    SPRINT_LENGTH_HOURS,
+    sprint_cycle_process,
+)
 from simulator.teams import Team
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+DEFAULT_NUM_SPRINTS = 12
+"""Sprints per team in a standard run — six months at two weeks a sprint."""
 
 
 def run_team(
@@ -106,17 +114,26 @@ def run_team(
     )
 
 
-if __name__ == "__main__":
-    import statistics
+def run_simulation(num_sprints: int = DEFAULT_NUM_SPRINTS) -> DataCollector:
+    """Run the full multi-team simulation and return the resulting ground truth.
 
-    from simulator.clock import seed_all
-    from simulator.lifecycle import DONE
-    from simulator.personalities import ALL_PERSONALITIES
-    from simulator.sprint_cycle import BACKLOG_WARMUP_HOURS, SPRINT_LENGTH_HOURS
-    from simulator.sprint_report import compute_sprint_report
+    This is the entrypoint for producing a complete dataset: it seeds the
+    run, builds every team in `ALL_PERSONALITIES` along with its users,
+    its own developer pool and its own backlog, starts each team's
+    processes, and runs the clock to the end of the last sprint.
 
-    NUM_SPRINTS = 12
+    Seeding happens here rather than at the call site so that any two
+    calls produce identical data — the whole point of a generated dataset
+    is that it is reproducible, and leaving that to callers invites one
+    of them to forget.
 
+    Args:
+        num_sprints: Sprints each team runs.
+
+    Returns:
+        A DataCollector holding every team, user, sprint, issue,
+        transition, membership and capacity row the run produced.
+    """
     seed_all()
 
     env = simpy.Environment()
@@ -145,10 +162,21 @@ if __name__ == "__main__":
             collector=collector,
             author_ids=author_ids,
             team=team,
-            num_sprints=NUM_SPRINTS,
+            num_sprints=num_sprints,
         )
 
-    env.run(until=BACKLOG_WARMUP_HOURS + NUM_SPRINTS * SPRINT_LENGTH_HOURS)
+    env.run(until=BACKLOG_WARMUP_HOURS + num_sprints * SPRINT_LENGTH_HOURS)
+    return collector
+
+
+if __name__ == "__main__":
+    import statistics
+
+    from simulator.lifecycle import DONE
+    from simulator.sprint_report import compute_sprint_report
+
+    NUM_SPRINTS = DEFAULT_NUM_SPRINTS
+    collector = run_simulation(NUM_SPRINTS)
 
     print(f"Cross-team comparison — {NUM_SPRINTS} sprints, {len(ALL_PERSONALITIES)} teams")
     print()

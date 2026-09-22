@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Generated simulator output — reproducible via scripts/generate_raw_data.py
+raw_data/
