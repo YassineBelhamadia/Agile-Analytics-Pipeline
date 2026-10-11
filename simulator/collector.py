@@ -28,8 +28,8 @@ from simulator.sprints import Sprint, SprintIssueMembership
 from simulator.teams import Team
 from simulator.users import User
 
-_TRANSITION_ID_SUFFIX = re.compile(r"(\d+)$")
-"""Extracts the counter value back out of an ID minted by this module."""
+_TRANSITION_ID_FORMAT = re.compile(r"^(.+)-TR-(\d+)$")
+"""Splits an ID minted by this module back into team key and counter."""
 
 
 class DataCollector:
@@ -53,10 +53,35 @@ class DataCollector:
         self.sprint_issue_memberships: list[SprintIssueMembership] = []
         self.capacities: list[Capacity] = []
 
-        self._next_transition_id = 1
+        # Per team key: the next counter value to mint for that team.
+        self._next_transition_number: dict[str, int] = {}
+        # issue_id -> owning team's key, rebuilt lazily (see _team_key_for_issue).
+        self._issue_team_key: dict[str, str] = {}
 
-    def _generate_transition_id(self) -> str:
-        """Generate the next deterministic transition_id.
+    def _team_key_for_issue(self, issue_id: str) -> str:
+        """Return the key of the team that owns `issue_id`.
+
+        Looked up through the entities rather than parsed out of the
+        issue_id string, so this class does not depend on how arrivals.py
+        happens to format issue IDs.
+
+        The mapping is cached and rebuilt from the entity lists on a miss,
+        which also covers issues that reached `issues` without going
+        through `record_issue` (a collector reloaded from disk).
+
+        Raises:
+            KeyError: If the issue or its team has not been recorded.
+        """
+        if issue_id not in self._issue_team_key:
+            team_key = {team.team_id: team.key for team in self.teams}
+            self._issue_team_key = {i.issue_id: team_key[i.team_id] for i in self.issues}
+        try:
+            return self._issue_team_key[issue_id]
+        except KeyError:
+            raise KeyError(f"no recorded issue {issue_id!r}") from None
+
+    def _generate_transition_id(self, issue_id: str) -> str:
+        """Generate the next deterministic transition_id for an issue's team.
 
         StatusTransition rows are the one entity in this model whose ID is
         assigned at record time rather than known upfront by the caller
@@ -66,19 +91,28 @@ class DataCollector:
         uuid4() specifically because the simulation must be reproducible:
         two runs seeded with the same SEED should produce byte-identical
         transition IDs, which a random UUID would not guarantee.
+
+        The counter is kept per team and the ID is prefixed with the team
+        key ("ATL-TR-1"), the same namespacing issues and sprints use. A
+        single counter shared by every team would make one team's IDs
+        depend on how many transitions the other teams had recorded so
+        far, so retuning or adding a team would renumber everyone else's
+        history even though nothing about it had changed.
         """
-        transition_id = f"TR-{self._next_transition_id}"
-        self._next_transition_id += 1
-        return transition_id
+        team_key = self._team_key_for_issue(issue_id)
+        number = self._next_transition_number.get(team_key, 1)
+        self._next_transition_number[team_key] = number + 1
+        return f"{team_key}-TR-{number}"
 
     def resume_transition_counter(self) -> None:
-        """Advance the transition-ID counter past the transitions already held.
+        """Advance every team's transition-ID counter past the transitions held.
 
-        A collector normally mints IDs from a counter that starts at 1,
+        A collector normally mints IDs from counters that start at 1,
         which is correct for a fresh simulation run. It is wrong for a
         collector populated from somewhere else — reloaded from disk, say
-        — because the counter would still be at 1 while `TR-1` already
-        exists, and the next recorded transition would duplicate it.
+        — because a team's counter would still be at 1 while its `-TR-1`
+        already exists, and the next recorded transition would duplicate
+        it.
 
         Call this after filling `status_transitions` by any route other
         than `record_transition`. It reads the transitions the collector
@@ -89,16 +123,17 @@ class DataCollector:
         Parsing the counter back out of the ID string belongs here
         because this class is what put it there: `_generate_transition_id`
         defines the format, and nothing outside this module should need
-        to know it. IDs that don't end in digits are skipped rather than
-        treated as errors — the counter only has to clear what is
+        to know it. IDs not in that format are skipped rather than
+        treated as errors — the counters only have to clear what is
         present, not account for every way an ID might have been formed.
         """
-        highest = 0
+        highest: dict[str, int] = {}
         for transition in self.status_transitions:
-            match = _TRANSITION_ID_SUFFIX.search(transition.transition_id)
+            match = _TRANSITION_ID_FORMAT.match(transition.transition_id)
             if match:
-                highest = max(highest, int(match.group(1)))
-        self._next_transition_id = highest + 1
+                team_key, number = match.group(1), int(match.group(2))
+                highest[team_key] = max(highest.get(team_key, 0), number)
+        self._next_transition_number = {key: n + 1 for key, n in highest.items()}
 
     def record_team(self, team_id: str, key: str, name: str, base_headcount: int) -> Team:
         """Construct a Team and append it to `teams`."""
@@ -182,7 +217,7 @@ class DataCollector:
         recorded.
         """
         transition = StatusTransition(
-            transition_id=self._generate_transition_id(),
+            transition_id=self._generate_transition_id(issue_id),
             issue_id=issue_id,
             from_status=from_status,
             to_status=to_status,

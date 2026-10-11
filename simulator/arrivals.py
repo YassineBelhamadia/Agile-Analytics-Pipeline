@@ -21,7 +21,6 @@ board, and they never enter the backlog.
 
 from __future__ import annotations
 
-import random
 from collections import deque
 from collections.abc import Generator, Sequence
 
@@ -32,6 +31,7 @@ from simulator.clock import sim_to_real
 from simulator.collector import DataCollector
 from simulator.issues import Issue
 from simulator.lifecycle import TODO
+from simulator.rng import choice, weighted_choice
 from simulator.teams import Team
 
 EPIC = "Epic"
@@ -111,7 +111,7 @@ points is what ARRIVAL_RATE_PER_HOUR was calibrated against.
 """
 
 
-def _sample_interarrival_hours(arrival_rate_per_hour: float) -> float:
+def _sample_interarrival_hours(rng: np.random.Generator, arrival_rate_per_hour: float) -> float:
     """Sample the gap in working hours until the next issue arrives.
 
     Exponentially distributed gaps are the standard model for arrivals
@@ -129,12 +129,13 @@ def _sample_interarrival_hours(arrival_rate_per_hour: float) -> float:
     disappear.
 
     Args:
+        rng: The team's random stream.
         arrival_rate_per_hour: The team's mean arrivals per working hour.
     """
-    return float(np.random.exponential(1.0 / arrival_rate_per_hour))
+    return float(rng.exponential(1.0 / arrival_rate_per_hour))
 
 
-def _sample_issue_type(weights: dict[str, float]) -> str:
+def _sample_issue_type(rng: np.random.Generator, weights: dict[str, float]) -> str:
     """Pick an issue type according to the supplied weights.
 
     The weights are a parameter rather than a module constant because the
@@ -142,23 +143,22 @@ def _sample_issue_type(weights: dict[str, float]) -> str:
     swaps in a bug-heavy distribution (see sprint_cycle.py).
 
     Args:
+        rng: The team's random stream.
         weights: Issue type to relative frequency. Need not sum to 1.
     """
-    return random.choices(list(weights), weights=list(weights.values()))[0]
+    return weighted_choice(rng, weights)
 
 
-def _sample_story_points() -> int:
+def _sample_story_points(rng: np.random.Generator) -> int:
     """Pick a story point estimate according to STORY_POINT_WEIGHTS."""
-    return random.choices(
-        list(STORY_POINT_WEIGHTS),
-        weights=list(STORY_POINT_WEIGHTS.values()),
-    )[0]
+    return weighted_choice(rng, STORY_POINT_WEIGHTS)
 
 
-def _pick_parent_epic(open_epics: Sequence[str]) -> str | None:
+def _pick_parent_epic(rng: np.random.Generator, open_epics: Sequence[str]) -> str | None:
     """Decide which Epic, if any, a new issue belongs to.
 
     Args:
+        rng: The team's random stream.
         open_epics: issue_ids of Epics created so far in this run.
 
     Returns:
@@ -167,9 +167,9 @@ def _pick_parent_epic(open_epics: Sequence[str]) -> str | None:
     """
     if not open_epics:
         return None
-    if random.random() >= EPIC_LINK_PROBABILITY:
+    if rng.random() >= EPIC_LINK_PROBABILITY:
         return None
-    return random.choice(open_epics)
+    return choice(rng, open_epics)
 
 
 def arrivals_process(
@@ -181,6 +181,7 @@ def arrivals_process(
     weights_ref: dict[str, dict[str, float]],
     arrival_rate_per_hour: float,
     issue_type_weights: dict[str, float],
+    rng: np.random.Generator,
 ) -> Generator[simpy.Event, None, None]:
     """Generate new issues for `team` for as long as the simulation runs.
 
@@ -235,6 +236,8 @@ def arrivals_process(
             normal mix under "base". Populated here at process start.
         arrival_rate_per_hour: The team's mean arrivals per working hour.
         issue_type_weights: The team's normal issue type mix.
+        rng: The team's own random stream (see simulator/rng.py). Every
+            draw this process makes comes from it.
 
     Yields:
         SimPy timeout events, one per gap between arrivals.
@@ -246,10 +249,10 @@ def arrivals_process(
     issue_number = 0
 
     while True:
-        yield env.timeout(_sample_interarrival_hours(arrival_rate_per_hour))
+        yield env.timeout(_sample_interarrival_hours(rng, arrival_rate_per_hour))
 
         issue_number += 1
-        issue_type = _sample_issue_type(weights_ref["current"])
+        issue_type = _sample_issue_type(rng, weights_ref["current"])
         is_epic = issue_type == EPIC
 
         issue = collector.record_issue(
@@ -260,10 +263,10 @@ def arrivals_process(
             issue_type=issue_type,
             team_id=team.team_id,
             # Epics are top-level in v1: no epic-inside-an-epic nesting.
-            parent_id=None if is_epic else _pick_parent_epic(open_epics),
-            assignee_id=random.choice(author_ids),
-            reporter_id=random.choice(author_ids),
-            story_points=None if is_epic else _sample_story_points(),
+            parent_id=None if is_epic else _pick_parent_epic(rng, open_epics),
+            assignee_id=choice(rng, author_ids),
+            reporter_id=choice(rng, author_ids),
+            story_points=None if is_epic else _sample_story_points(rng),
             status=TODO,
             created=sim_to_real(env.now),
             duedate=None,
@@ -282,14 +285,13 @@ def arrivals_process(
 if __name__ == "__main__":
     from collections import Counter
 
-    from simulator.clock import WORK_HOURS_PER_DAY, seed_all
+    from simulator.clock import SEED, WORK_HOURS_PER_DAY
+    from simulator.rng import team_rng
 
     DEMO_HEADCOUNT = 3
     SPRINT_LENGTH_DAYS = 10
     SPRINTS_TO_RUN = 2
     RUN_HOURS = SPRINTS_TO_RUN * SPRINT_LENGTH_DAYS * WORK_HOURS_PER_DAY
-
-    seed_all()
 
     env = simpy.Environment()
     collector = DataCollector()
@@ -319,6 +321,7 @@ if __name__ == "__main__":
             weights_ref,
             arrival_rate_per_hour=ARRIVAL_RATE_PER_HOUR,
             issue_type_weights=ISSUE_TYPE_WEIGHTS,
+            rng=team_rng(SEED, team.key),
         )
     )
     env.run(until=RUN_HOURS)

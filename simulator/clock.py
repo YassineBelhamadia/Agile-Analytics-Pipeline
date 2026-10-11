@@ -28,19 +28,26 @@ changelog.
 
 from __future__ import annotations
 
-import random
 from datetime import date, datetime, timedelta
 
-import numpy as np
+SEED = 22
+"""Base seed for the run that produces raw_data/.
 
-SEED = 11
-"""Seed used to make the whole simulation reproducible from one call.
+Each team's random stream is derived from this seed and the team key
+(see simulator/rng.py), so this one number reproduces the whole dataset.
+It is not the calibration seed set: calibration is measured across
+CALIBRATION_SEEDS in simulator/calibration.py, because sprint outcomes
+vary widely by seed and no single run is a reliable measure.
 
-Chosen rather than arbitrary. Sprint outcomes vary widely by seed, and
-this one produces a sprint hit rate of 58%, close to the design's ~62%
-average across fifteen tested seeds. The previous value of 42 happened to
-land at 33% — a tail case roughly two standard deviations below the mean,
-which made the simulation look considerably worse calibrated than it is.
+Selected as a typical run, not drawn at random. Of seeds 1-100, 22 is
+the closest to the 60-seed calibration averages among those where the
+intended ordering Phoenix < Nomad < Atlas holds strictly: it gives 42% /
+50% / 75% hit rates (56% overall) against averages of 43% / 53% / 73%
+(56% overall), and its completed issue counts are also the closest to
+average among the tied candidates (seeds 69 and 50 give the same hit
+rates). The previous seed, 11, had drifted to an unrepresentative 50% /
+42% / 58% under the current calibration, with Nomad below Phoenix.
+Re-check this choice whenever the calibration changes.
 """
 
 PROJECT_START = datetime(2024, 1, 8, 9, 0)
@@ -121,16 +128,6 @@ def sim_to_real(sim_hours: float) -> datetime:
         target_date.day,
         WORK_START_HOUR,
     ) + timedelta(hours=remainder_hours)
-
-
-def seed_all() -> None:
-    """Seed Python's `random` and numpy's random with SEED.
-
-    Every source of randomness in the simulation must be seeded from this
-    one call so that an entire simulation run is reproducible end to end.
-    """
-    random.seed(SEED)
-    np.random.seed(SEED)
 
 
 if __name__ == "__main__":

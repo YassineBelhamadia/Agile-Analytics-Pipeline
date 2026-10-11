@@ -236,11 +236,12 @@ def load_from_json(input_dir: Path | str) -> DataCollector:
     """Rebuild a DataCollector from a directory written by `dump_to_json`.
 
     The returned collector is equal, entity for entity, to the one that
-    was dumped. It is also asked to resume its transition-ID counter past
-    the highest ID present, so a reloaded collector can keep recording
-    without colliding with IDs already on disk — without that, the first
-    transition recorded after a load would reuse "TR-1". How the counter
-    is derived is DataCollector's business, not this module's.
+    was dumped. It is also asked to resume its per-team transition-ID
+    counters past the highest IDs present, so a reloaded collector can keep
+    recording without colliding with IDs already on disk — without that,
+    the first transition recorded for a team after a load would reuse its
+    "-TR-1". How the counters are derived is DataCollector's business, not
+    this module's.
 
     Args:
         input_dir: Directory containing the seven entity files.
@@ -266,49 +267,15 @@ def load_from_json(input_dir: Path | str) -> DataCollector:
 
 if __name__ == "__main__":
     import tempfile
-    from collections import deque
 
-    import simpy
-
-    from simulator.clock import seed_all
-    from simulator.multi_team import run_team
-    from simulator.personalities import ALL_PERSONALITIES
-    from simulator.sprint_cycle import BACKLOG_WARMUP_HOURS, SPRINT_LENGTH_HOURS
+    from simulator.multi_team import run_simulation
 
     NUM_SPRINTS = 12
 
     # Round-trip against real simulated output, not a hand-built fixture:
     # an empty or synthetic collector would never exercise None-valued
     # optional fields, microsecond timestamps, or date-vs-datetime.
-    seed_all()
-    env = simpy.Environment()
-    original = DataCollector()
-    for personality in ALL_PERSONALITIES:
-        team = original.record_team(
-            team_id=personality.team_id,
-            key=personality.key,
-            name=personality.name,
-            base_headcount=personality.headcount,
-        )
-        author_ids = [
-            original.record_user(
-                user_id=f"{personality.key}-U-{n}",
-                display_name=f"{personality.name} Dev {n}",
-                team_id=team.team_id,
-            ).user_id
-            for n in range(1, personality.headcount + 1)
-        ]
-        run_team(
-            env,
-            personality,
-            dev_resource=simpy.Resource(env, capacity=personality.headcount),
-            backlog=deque(),
-            collector=original,
-            author_ids=author_ids,
-            team=team,
-            num_sprints=NUM_SPRINTS,
-        )
-    env.run(until=BACKLOG_WARMUP_HOURS + NUM_SPRINTS * SPRINT_LENGTH_HOURS)
+    original = run_simulation(NUM_SPRINTS)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         dump_to_json(original, tmpdir)

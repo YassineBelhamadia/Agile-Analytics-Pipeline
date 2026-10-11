@@ -25,7 +25,6 @@ whole simulation and never resized; see `pto_process` for why that works.
 
 from __future__ import annotations
 
-import random
 from collections import deque
 from collections.abc import Generator, Sequence
 
@@ -37,6 +36,7 @@ from simulator.clock import WORK_HOURS_PER_DAY, sim_to_real
 from simulator.collector import DataCollector
 from simulator.issues import Issue
 from simulator.lifecycle import HOURS_PER_POINT, QA_BOUNCE_PROBABILITY, issue_lifecycle
+from simulator.rng import team_rng
 from simulator.sprints import Sprint
 from simulator.teams import Team
 
@@ -227,6 +227,7 @@ def _sample_pto_days(
     high_pto_probability: float,
     low_pto_range: tuple[float, float],
     high_pto_range: tuple[float, float],
+    rng: np.random.Generator,
 ) -> float:
     """Draw this sprint's actual PTO days from one of the team's two regimes.
 
@@ -239,13 +240,14 @@ def _sample_pto_days(
             regime rather than the normal one.
         low_pto_range: Day bounds for a normal sprint.
         high_pto_range: Day bounds for a heavy-absence sprint.
+        rng: The team's random stream.
 
     Returns:
         Days of PTO actually taken by the team this sprint.
     """
-    if random.random() < high_pto_probability:
-        return random.uniform(*high_pto_range)
-    return random.uniform(*low_pto_range)
+    if rng.random() < high_pto_probability:
+        return float(rng.uniform(*high_pto_range))
+    return float(rng.uniform(*low_pto_range))
 
 
 def pto_process(
@@ -303,6 +305,7 @@ def scope_add_issue_process(
     author_ids: Sequence[str],
     hours_per_point: float,
     qa_bounce_probability: float,
+    rng: np.random.Generator,
 ) -> Generator[simpy.Event, None, None]:
     """Pull one extra issue into an already-committed sprint.
 
@@ -328,6 +331,7 @@ def scope_add_issue_process(
         hours_per_point: The team's hours-per-point conversion, passed
             through to the issue's lifecycle.
         qa_bounce_probability: The team's QA rejection rate, likewise.
+        rng: The team's random stream, likewise.
 
     Yields:
         A timeout for the offset.
@@ -352,6 +356,7 @@ def scope_add_issue_process(
             author_ids,
             hours_per_point,
             qa_bounce_probability,
+            rng,
         )
     )
 
@@ -374,6 +379,7 @@ def sprint_cycle_process(
     high_pto_probability: float,
     low_pto_range: tuple[float, float],
     high_pto_range: tuple[float, float],
+    rng: np.random.Generator,
 ) -> Generator[simpy.Event, None, None]:
     """Run `num_sprints` consecutive sprints for one team.
 
@@ -426,6 +432,8 @@ def sprint_cycle_process(
             govern the absence that actually happens, as opposed to
             `average_pto_days_per_sprint`, which is only what the team
             assumed at planning time.
+        rng: The team's own random stream (see simulator/rng.py), used
+            for every draw this process and the processes it starts make.
 
     Yields:
         The warmup timeout, then one sprint-length timeout per sprint.
@@ -438,7 +446,7 @@ def sprint_cycle_process(
     team_incident_weights = incident_weights(base_weights)
 
     for sprint_number in range(1, num_sprints + 1):
-        pto_days = _sample_pto_days(high_pto_probability, low_pto_range, high_pto_range)
+        pto_days = _sample_pto_days(high_pto_probability, low_pto_range, high_pto_range, rng)
         sprint_start = sim_to_real(env.now)
 
         sprint = collector.record_sprint(
@@ -466,14 +474,14 @@ def sprint_cycle_process(
                     env,
                     dev_resource,
                     pto_hours=pto_days * WORK_HOURS_PER_DAY,
-                    offset_hours=random.uniform(0, SPRINT_LENGTH_HOURS),
+                    offset_hours=float(rng.uniform(0, SPRINT_LENGTH_HOURS)),
                 )
             )
 
-        is_incident = random.random() < BUG_INCIDENT_SPRINT_PROBABILITY
+        is_incident = rng.random() < BUG_INCIDENT_SPRINT_PROBABILITY
         weights_ref["current"] = team_incident_weights if is_incident else base_weights
 
-        optimism = random.uniform(*optimism_factor_range)
+        optimism = float(rng.uniform(*optimism_factor_range))
         baseline_available_hours = (
             headcount * SPRINT_LENGTH_HOURS - average_pto_days_per_sprint * WORK_HOURS_PER_DAY
         )
@@ -501,15 +509,16 @@ def sprint_cycle_process(
                     author_ids,
                     hours_per_point,
                     qa_bounce_probability,
+                    rng,
                 )
             )
             committed_points += issue.story_points
 
-        for _ in range(int(np.random.poisson(SCOPE_ADD_POISSON_MEAN))):
+        for _ in range(int(rng.poisson(SCOPE_ADD_POISSON_MEAN))):
             env.process(
                 scope_add_issue_process(
                     env,
-                    offset_hours=random.uniform(0, SPRINT_LENGTH_HOURS),
+                    offset_hours=float(rng.uniform(0, SPRINT_LENGTH_HOURS)),
                     backlog=backlog,
                     sprint=sprint,
                     dev_resource=dev_resource,
@@ -517,6 +526,7 @@ def sprint_cycle_process(
                     author_ids=author_ids,
                     hours_per_point=hours_per_point,
                     qa_bounce_probability=qa_bounce_probability,
+                    rng=rng,
                 )
             )
 
@@ -525,12 +535,10 @@ def sprint_cycle_process(
 
 if __name__ == "__main__":
     from simulator.arrivals import arrivals_process
-    from simulator.clock import seed_all
+    from simulator.clock import SEED
     from simulator.sprint_report import compute_sprint_report
 
     NUM_SPRINTS = 12
-
-    seed_all()
 
     env = simpy.Environment()
     collector = DataCollector()
@@ -544,6 +552,7 @@ if __name__ == "__main__":
     for n in range(1, HEADCOUNT + 1):
         collector.record_user(user_id=f"U-{n}", display_name=f"Dev {n}", team_id=team.team_id)
     author_ids = [user.user_id for user in collector.users]
+    rng = team_rng(SEED, team.key)
 
     backlog: deque[Issue] = deque()
     # Populated by arrivals_process from the weights passed to it below.
@@ -563,6 +572,7 @@ if __name__ == "__main__":
             weights_ref,
             arrival_rate_per_hour=ARRIVAL_RATE_PER_HOUR,
             issue_type_weights=ISSUE_TYPE_WEIGHTS,
+            rng=rng,
         )
     )
     env.process(
@@ -584,6 +594,7 @@ if __name__ == "__main__":
             high_pto_probability=HIGH_PTO_SPRINT_PROBABILITY,
             low_pto_range=LOW_PTO_RANGE,
             high_pto_range=HIGH_PTO_RANGE,
+            rng=rng,
         )
     )
     env.run(until=BACKLOG_WARMUP_HOURS + NUM_SPRINTS * SPRINT_LENGTH_HOURS)

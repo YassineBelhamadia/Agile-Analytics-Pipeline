@@ -21,7 +21,6 @@ be tuned once real analytics run on top of the output.
 
 from __future__ import annotations
 
-import random
 from collections.abc import Generator, Sequence
 
 import numpy as np
@@ -30,6 +29,7 @@ import simpy
 from simulator.clock import sim_to_real
 from simulator.collector import DataCollector
 from simulator.issues import Issue
+from simulator.rng import choice
 
 TODO = "To Do"
 IN_PROGRESS = "In Progress"
@@ -93,17 +93,19 @@ about.
 """
 
 
-def _sample_todo_hours() -> float:
+def _sample_todo_hours(rng: np.random.Generator) -> float:
     """Sample how long an issue sits in To Do before being picked up.
 
     A flat range is deliberate: pickup latency is not what this block is
     trying to model faithfully, and a uniform draw avoids implying more
     precision than intended.
     """
-    return random.uniform(TODO_MIN_HOURS, TODO_MAX_HOURS)
+    return float(rng.uniform(TODO_MIN_HOURS, TODO_MAX_HOURS))
 
 
-def _sample_in_progress_hours(story_points: int, hours_per_point: float) -> float:
+def _sample_in_progress_hours(
+    rng: np.random.Generator, story_points: int, hours_per_point: float
+) -> float:
     """Sample actual hours of active work for an issue of `story_points`.
 
     The log-normal distribution is the key modelling choice here. Real
@@ -123,6 +125,7 @@ def _sample_in_progress_hours(story_points: int, hours_per_point: float) -> floa
     it commits to, which is the realistic behaviour being reproduced.
 
     Args:
+        rng: The team's random stream.
         story_points: The issue's point estimate. Must not be None —
             Epics carry no points (their points are a rollup of children,
             per the domain model) and are not worked through this process.
@@ -134,21 +137,21 @@ def _sample_in_progress_hours(story_points: int, hours_per_point: float) -> floa
         Hours of active work, always positive.
     """
     base_hours = story_points * hours_per_point
-    return float(np.random.lognormal(mean=np.log(base_hours), sigma=IN_PROGRESS_LOGNORMAL_SIGMA))
+    return float(rng.lognormal(mean=np.log(base_hours), sigma=IN_PROGRESS_LOGNORMAL_SIGMA))
 
 
-def _sample_code_review_hours() -> float:
+def _sample_code_review_hours(rng: np.random.Generator) -> float:
     """Sample how long an issue waits in Code Review.
 
     Shorter than In Progress and flat, since review latency is dominated
     by a reviewer's availability rather than by the size of the change.
     """
-    return random.uniform(CODE_REVIEW_MIN_HOURS, CODE_REVIEW_MAX_HOURS)
+    return float(rng.uniform(CODE_REVIEW_MIN_HOURS, CODE_REVIEW_MAX_HOURS))
 
 
-def _sample_qa_hours() -> float:
+def _sample_qa_hours(rng: np.random.Generator) -> float:
     """Sample how long an issue spends in QA before a verdict is reached."""
-    return random.uniform(QA_MIN_HOURS, QA_MAX_HOURS)
+    return float(rng.uniform(QA_MIN_HOURS, QA_MAX_HOURS))
 
 
 def _move(
@@ -158,6 +161,7 @@ def _move(
     from_status: str,
     to_status: str,
     author_ids: Sequence[str],
+    rng: np.random.Generator,
 ) -> None:
     """Record one status change and update the issue's current status.
 
@@ -176,13 +180,14 @@ def _move(
         to_status: Status the issue is entering.
         author_ids: Candidate users who could have performed this
             transition; one is chosen at random.
+        rng: The team's random stream, used to choose the author.
     """
     collector.record_transition(
         issue_id=issue.issue_id,
         from_status=from_status,
         to_status=to_status,
         timestamp=sim_to_real(env.now),
-        author_id=random.choice(author_ids),
+        author_id=choice(rng, author_ids),
     )
     issue.status = to_status
 
@@ -195,6 +200,7 @@ def issue_lifecycle(
     author_ids: Sequence[str],
     hours_per_point: float,
     qa_bounce_probability: float,
+    rng: np.random.Generator,
 ) -> Generator[simpy.Event, None, None]:
     """Drive one issue from To Do through to Done.
 
@@ -255,6 +261,8 @@ def issue_lifecycle(
             on each pass. Both are per-team tunables rather than module
             constants, so several teams with different characters can run
             against the same code in one simulation.
+        rng: The owning team's random stream (see simulator/rng.py).
+            Every duration, author and QA verdict is drawn from it.
 
     Yields:
         SimPy timeout and resource-request events as the issue advances.
@@ -265,35 +273,34 @@ def issue_lifecycle(
         f"must not be run through the lifecycle state machine"
     )
 
-    yield env.timeout(_sample_todo_hours())
-    _move(env, issue, collector, TODO, IN_PROGRESS, author_ids)
+    yield env.timeout(_sample_todo_hours(rng))
+    _move(env, issue, collector, TODO, IN_PROGRESS, author_ids, rng)
 
     bounces = 0
     while True:
         with dev_resource.request() as req:
             yield req
-            yield env.timeout(_sample_in_progress_hours(issue.story_points, hours_per_point))
-        _move(env, issue, collector, IN_PROGRESS, CODE_REVIEW, author_ids)
+            yield env.timeout(_sample_in_progress_hours(rng, issue.story_points, hours_per_point))
+        _move(env, issue, collector, IN_PROGRESS, CODE_REVIEW, author_ids, rng)
 
-        yield env.timeout(_sample_code_review_hours())
-        _move(env, issue, collector, CODE_REVIEW, QA, author_ids)
+        yield env.timeout(_sample_code_review_hours(rng))
+        _move(env, issue, collector, CODE_REVIEW, QA, author_ids, rng)
 
-        yield env.timeout(_sample_qa_hours())
-        if bounces < MAX_QA_BOUNCES and random.random() < qa_bounce_probability:
+        yield env.timeout(_sample_qa_hours(rng))
+        if bounces < MAX_QA_BOUNCES and rng.random() < qa_bounce_probability:
             bounces += 1
-            _move(env, issue, collector, QA, IN_PROGRESS, author_ids)
+            _move(env, issue, collector, QA, IN_PROGRESS, author_ids, rng)
             continue
 
-        _move(env, issue, collector, QA, DONE, author_ids)
+        _move(env, issue, collector, QA, DONE, author_ids, rng)
         break
 
     issue.resolutiondate = sim_to_real(env.now)
 
 
 if __name__ == "__main__":
-    from simulator.clock import PROJECT_START, seed_all
-
-    seed_all()
+    from simulator.clock import PROJECT_START, SEED
+    from simulator.rng import team_rng
 
     env = simpy.Environment()
     collector = DataCollector()
@@ -326,6 +333,7 @@ if __name__ == "__main__":
             author_ids=["U-1", "U-2", "U-3"],
             hours_per_point=HOURS_PER_POINT,
             qa_bounce_probability=QA_BOUNCE_PROBABILITY,
+            rng=team_rng(SEED, "AAP"),
         )
     )
     env.run()

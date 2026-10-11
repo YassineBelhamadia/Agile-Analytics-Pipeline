@@ -20,13 +20,15 @@ from __future__ import annotations
 from collections import deque
 from typing import TYPE_CHECKING
 
+import numpy as np
 import simpy
 
 from simulator.arrivals import arrivals_process
-from simulator.clock import seed_all
+from simulator.clock import SEED
 from simulator.collector import DataCollector
 from simulator.issues import Issue
 from simulator.personalities import ALL_PERSONALITIES, TeamPersonality
+from simulator.rng import team_rng
 from simulator.sprint_cycle import (
     BACKLOG_WARMUP_HOURS,
     SPRINT_LENGTH_HOURS,
@@ -50,6 +52,7 @@ def run_team(
     author_ids: Sequence[str],
     team: Team,
     num_sprints: int,
+    rng: np.random.Generator,
 ) -> None:
     """Start one team's arrivals and sprint cycle inside a shared environment.
 
@@ -75,6 +78,9 @@ def run_team(
             and transition authors.
         team: The already-recorded Team row these processes attach to.
         num_sprints: How many sprints this team runs.
+        rng: This team's own random stream. Both processes, and every
+            issue lifecycle they start, draw from it and from nothing
+            else, so this team's data cannot be moved by another team.
     """
     # Populated by arrivals_process at time zero, from the weights below.
     weights_ref: dict[str, dict[str, float]] = {}
@@ -89,6 +95,7 @@ def run_team(
             weights_ref,
             arrival_rate_per_hour=personality.arrival_rate_per_hour,
             issue_type_weights=personality.issue_type_weights,
+            rng=rng,
         )
     )
     env.process(
@@ -110,36 +117,45 @@ def run_team(
             high_pto_probability=personality.high_pto_probability,
             low_pto_range=personality.low_pto_range,
             high_pto_range=personality.high_pto_range,
+            rng=rng,
         )
     )
 
 
-def run_simulation(num_sprints: int = DEFAULT_NUM_SPRINTS) -> DataCollector:
+def run_simulation(
+    num_sprints: int = DEFAULT_NUM_SPRINTS,
+    seed: int = SEED,
+    personalities: Sequence[TeamPersonality] = ALL_PERSONALITIES,
+) -> DataCollector:
     """Run the full multi-team simulation and return the resulting ground truth.
 
     This is the entrypoint for producing a complete dataset: it seeds the
-    run, builds every team in `ALL_PERSONALITIES` along with its users,
+    run, builds every team in `personalities` along with its users,
     its own developer pool and its own backlog, starts each team's
     processes, and runs the clock to the end of the last sprint.
 
-    Seeding happens here rather than at the call site so that any two
-    calls produce identical data — the whole point of a generated dataset
-    is that it is reproducible, and leaving that to callers invites one
-    of them to forget.
+    Each team gets its own random stream, derived here from `seed` and
+    the team's key (see simulator/rng.py), rather than leaving callers to
+    seed anything. Any two calls with the same seed therefore produce
+    identical data, and because no stream is shared, one team's
+    parameters — or the presence of another team — cannot change a
+    different team's data.
 
     Args:
         num_sprints: Sprints each team runs.
+        seed: Seed for the run. The default reproduces raw_data/;
+            calibration overrides it to sweep its seed set.
+        personalities: Teams to simulate. The default is the standard
+            three; calibration passes variants with retuned parameters.
 
     Returns:
         A DataCollector holding every team, user, sprint, issue,
         transition, membership and capacity row the run produced.
     """
-    seed_all()
-
     env = simpy.Environment()
     collector = DataCollector()
 
-    for personality in ALL_PERSONALITIES:
+    for personality in personalities:
         team = collector.record_team(
             team_id=personality.team_id,
             key=personality.key,
@@ -163,6 +179,7 @@ def run_simulation(num_sprints: int = DEFAULT_NUM_SPRINTS) -> DataCollector:
             author_ids=author_ids,
             team=team,
             num_sprints=num_sprints,
+            rng=team_rng(seed, personality.key),
         )
 
     env.run(until=BACKLOG_WARMUP_HOURS + num_sprints * SPRINT_LENGTH_HOURS)
