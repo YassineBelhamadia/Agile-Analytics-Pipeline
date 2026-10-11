@@ -25,7 +25,9 @@ as `+00:00`.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, date, datetime, time
+from functools import partial
 
 from mock_api import ids
 from mock_api.config import (
@@ -38,7 +40,7 @@ from mock_api.config import (
 )
 from mock_api.index import GroundTruthIndex
 from simulator.issues import Issue, StatusTransition
-from simulator.sprints import Sprint
+from simulator.sprints import Sprint, SprintIssueMembership
 from simulator.teams import Team
 from simulator.users import User
 
@@ -274,7 +276,7 @@ def serialize_issue(issue: Issue, index: GroundTruthIndex) -> dict:
     }
 
 
-def _history(transition: StatusTransition, index: GroundTruthIndex) -> dict:
+def _status_history(transition: StatusTransition, index: GroundTruthIndex) -> dict:
     return {
         "id": ids.changelog_id(transition.transition_id),
         "author": _user(index.users[transition.author_id]),
@@ -293,6 +295,86 @@ def _history(transition: StatusTransition, index: GroundTruthIndex) -> dict:
     }
 
 
+def _sprint_list(sprints: list[Sprint]) -> tuple[str, str]:
+    """Render a sprint field value as a changelog item does: IDs, then names.
+
+    The Sprint field holds every sprint an issue has been in, so a
+    changelog item records the whole list before and after the change,
+    comma-and-space separated. An empty field renders as empty strings.
+    """
+    return (
+        ", ".join(str(ids.sprint_id(s.sprint_id)) for s in sprints),
+        ", ".join(s.name for s in sprints),
+    )
+
+
+def _sprint_history(
+    membership: SprintIssueMembership,
+    earlier: list[SprintIssueMembership],
+    issue: Issue,
+    index: GroundTruthIndex,
+) -> dict:
+    """One changelog history for an issue joining a sprint.
+
+    Args:
+        membership: The membership this history records.
+        earlier: The issue's memberships added before this one, oldest
+            first: the field's value just before the change.
+        issue: The issue that joined the sprint.
+        index: Lookups over the ground truth.
+
+    Returns:
+        The history. The ground truth does not record who moved an issue
+        into a sprint, so the issue's reporter stands in as author; with
+        no reporter the `author` key is left out, as Jira does for
+        changes it attributes to no user.
+    """
+    before = [index.sprints[m.sprint_id] for m in earlier]
+    after = before + [index.sprints[membership.sprint_id]]
+    from_ids, from_names = _sprint_list(before)
+    to_ids, to_names = _sprint_list(after)
+
+    history: dict = {
+        "id": ids.changelog_id(ids.membership_changelog_key(membership.issue_id, membership.sprint_id)),
+    }
+    if issue.reporter_id is not None:
+        history["author"] = _user(index.users[issue.reporter_id])
+    history["created"] = jira_datetime(membership.added_at)
+    history["items"] = [
+        {
+            "field": "Sprint",
+            "fieldtype": "custom",
+            "fieldId": SPRINT_FIELD,
+            "from": from_ids,
+            "fromString": from_names,
+            "to": to_ids,
+            "toString": to_names,
+        }
+    ]
+    return history
+
+
+def _histories_oldest_first(
+    issue: Issue, index: GroundTruthIndex
+) -> list[tuple[datetime, Callable[[], dict]]]:
+    """Every changelog event on an issue, merged and sorted by time.
+
+    Returns (instant, builder) pairs rather than built histories, so a
+    page only pays for the histories it actually contains. The index has
+    already guaranteed no two events on one issue share a millisecond,
+    so the order is total and matches the serialized `created` values.
+    """
+    events: list[tuple[datetime, Callable[[], dict]]] = [
+        (t.timestamp, partial(_status_history, t, index)) for t in index.transitions_for(issue)
+    ]
+    memberships = index.memberships_for(issue)
+    events += [
+        (m.added_at, partial(_sprint_history, m, memberships[:position], issue, index))
+        for position, m in enumerate(memberships)
+    ]
+    return sorted(events, key=lambda event: event[0])
+
+
 def serialize_changelog(
     issue: Issue,
     index: GroundTruthIndex,
@@ -301,8 +383,10 @@ def serialize_changelog(
 ) -> dict:
     """Build the GET /rest/api/3/issue/{issueIdOrKey}/changelog body.
 
-    One history per status transition, oldest first, as Jira documents
-    for this endpoint. The response is a page; `total` counts every
+    One history per status transition and one per sprint the issue
+    joined, merged oldest first, as Jira documents for this endpoint.
+    The sprint histories are what let a client tell committed work from
+    scope added mid-sprint. The response is a page; `total` counts every
     history on the issue, not just the ones on this page.
 
     Args:
@@ -320,18 +404,18 @@ def serialize_changelog(
     if start_at < 0 or max_results < 1:
         raise ValueError(f"invalid page: start_at={start_at}, max_results={max_results}")
 
-    transitions = index.transitions_for(issue)
-    page = transitions[start_at : start_at + max_results]
-    is_last = start_at + max_results >= len(transitions)
+    events = _histories_oldest_first(issue, index)
+    page = events[start_at : start_at + max_results]
+    is_last = start_at + max_results >= len(events)
     base = f"{PLATFORM_API}/issue/{issue.key}/changelog"
 
     payload: dict = {
         "self": f"{base}?startAt={start_at}&maxResults={max_results}",
         "maxResults": max_results,
         "startAt": start_at,
-        "total": len(transitions),
+        "total": len(events),
         "isLast": is_last,
-        "values": [_history(t, index) for t in page],
+        "values": [build() for _, build in page],
     }
     if not is_last:
         payload["nextPage"] = f"{base}?startAt={start_at + max_results}&maxResults={max_results}"

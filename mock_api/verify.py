@@ -131,24 +131,33 @@ def check_issues(index: GroundTruthIndex) -> Counter:
 
 
 def check_changelogs(index: GroundTruthIndex) -> Counter:
-    """Check history counts, ordering, and that each history replays its transition."""
+    """Check history counts, ordering, and that each history replays its source row."""
     tally: Counter = Counter()
     for issue in index.issues.values():
         transitions = index.transitions_for(issue)
+        memberships = index.memberships_for(issue)
+        expected = len(transitions) + len(memberships)
         page = serialize_changelog(issue, index)
         histories = page["values"]
         where = issue.key
 
-        check(page["total"] == len(transitions), f"{where}: total")
-        check(len(histories) == len(transitions), f"{where}: history count")
+        check(page["total"] == expected, f"{where}: total")
+        check(len(histories) == expected, f"{where}: history count")
 
         created = [parse_jira_ts(h["created"]) for h in histories]
         check(created == sorted(created), f"{where}: histories not oldest-first")
         check(len(set(created)) == len(created), f"{where}: two histories share a timestamp")
+        check(len({h["id"] for h in histories}) == len(histories), f"{where}: duplicate history id")
 
-        for history, t in zip(histories, transitions, strict=True):
+        status_histories = [h for h in histories if h["items"][0]["field"] == "status"]
+        sprint_histories = [h for h in histories if h["items"][0]["field"] == "Sprint"]
+        check(
+            len(status_histories) + len(sprint_histories) == len(histories),
+            f"{where}: history with an unexpected field",
+        )
+
+        for history, t in zip(status_histories, transitions, strict=True):
             (item,) = history["items"]
-            check(item["field"] == "status", f"{where}: item field")
             check(item["fromString"] == t.from_status, f"{where}: fromString")
             check(item["toString"] == t.to_status, f"{where}: toString")
             check(item["from"] == STATUS_IDS[t.from_status], f"{where}: from id")
@@ -156,30 +165,97 @@ def check_changelogs(index: GroundTruthIndex) -> Counter:
             check(history["author"]["accountId"] == ids.account_id(t.author_id), f"{where}: author")
             check(history["created"] == jira_datetime(t.timestamp), f"{where}: created")
 
-        # The history must replay to the issue's current status.
-        for prev, nxt in zip(histories, histories[1:]):
+        for history, m in zip(sprint_histories, memberships, strict=True):
+            (item,) = history["items"]
+            check(item["fieldtype"] == "custom", f"{where}: sprint fieldtype")
+            check(item["fieldId"] == SPRINT_FIELD, f"{where}: sprint fieldId")
+            check(
+                len(split_list(item["to"])) == len(split_list(item["toString"])),
+                f"{where}: sprint IDs and names disagree in length",
+            )
+            check(
+                history["author"]["accountId"] == ids.account_id(issue.reporter_id),
+                f"{where}: sprint history author is not the reporter",
+            )
+            check(history["created"] == jira_datetime(m.added_at), f"{where}: sprint created")
+
+        # The status histories must replay to the issue's current status.
+        for prev, nxt in zip(status_histories, status_histories[1:]):
             check(
                 prev["items"][0]["toString"] == nxt["items"][0]["fromString"],
-                f"{where}: history chain broken",
+                f"{where}: status chain broken",
             )
-        final = histories[-1]["items"][0]["toString"] if histories else "To Do"
+        final = status_histories[-1]["items"][0]["toString"] if status_histories else "To Do"
         check(final == issue.status, f"{where}: history ends at {final}, issue is {issue.status}")
 
-        # Paging must partition the same sequence the single page returns.
-        paged = []
-        start = 0
-        while True:
-            chunk = serialize_changelog(issue, index, start_at=start, max_results=2)
-            paged.extend(chunk["values"])
-            if chunk["isLast"]:
-                check("nextPage" not in chunk, f"{where}: nextPage on last page")
-                break
-            start += 2
-        check(paged == histories, f"{where}: paged histories differ from single page")
+        check(fetch_all_histories(issue, index) == histories, f"{where}: paged histories differ")
 
-        tally["histories"] += len(histories)
+        tally["status histories"] += len(status_histories)
+        tally["sprint histories"] += len(sprint_histories)
         tally["issues with no history" if not histories else "issues with history"] += 1
     return tally
+
+
+def split_list(value: str | None) -> list[str]:
+    """Split a multi-value changelog string ("1, 2") into its parts."""
+    return [part.strip() for part in value.split(",")] if value else []
+
+
+def fetch_all_histories(issue, index: GroundTruthIndex, page_size: int = 2) -> list[dict]:
+    """Walk the changelog endpoint page by page, as an API client would.
+
+    The small page size makes sure paging boundaries are exercised even
+    on issues with only a handful of histories.
+    """
+    histories: list[dict] = []
+    start = 0
+    while True:
+        chunk = serialize_changelog(issue, index, start_at=start, max_results=page_size)
+        histories.extend(chunk["values"])
+        if chunk["isLast"]:
+            check("nextPage" not in chunk, f"{issue.key}: nextPage on last page")
+            return histories
+        check("nextPage" in chunk, f"{issue.key}: no nextPage on a non-last page")
+        start += page_size
+
+
+def check_membership_reconstruction(index: GroundTruthIndex) -> int:
+    """Rebuild every sprint membership from the serialized changelogs alone.
+
+    For each Sprint history the sprint that was added is whatever appears
+    in `to` but not in `from`; the moment it was added is the history's
+    `created`. The rebuilt (issue, sprint, added_at) rows must equal the
+    ground-truth memberships exactly, with added_at compared at the
+    millisecond precision the payload carries.
+    """
+    sprint_by_jira_id = {serialize_sprint(s)["id"]: s.sprint_id for s in index.sprints.values()}
+    rebuilt: Counter = Counter()
+
+    for key, issue in index.issues_by_key.items():
+        for history in fetch_all_histories(issue, index):
+            for item in history["items"]:
+                if item["fieldId"] != SPRINT_FIELD:
+                    continue
+                before = [int(x) for x in split_list(item["from"])]
+                after = [int(x) for x in split_list(item["to"])]
+                check(after[: len(before)] == before, f"{key}: a sprint was removed or reordered")
+                added = after[len(before) :]
+                check(len(added) == 1, f"{key}: history adds {len(added)} sprints, expected 1")
+                added_at = parse_jira_ts(history["created"]).replace(tzinfo=None)
+                rebuilt[(issue.issue_id, sprint_by_jira_id[added[0]], added_at)] += 1
+
+    truth = Counter(
+        (m.issue_id, m.sprint_id, m.added_at.replace(microsecond=m.added_at.microsecond // 1000 * 1000))
+        for m in index.collector.sprint_issue_memberships
+    )
+    missing = truth - rebuilt
+    extra = rebuilt - truth
+    check(
+        not missing and not extra,
+        f"membership reconstruction mismatch: {sum(missing.values())} missing "
+        f"(e.g. {next(iter(missing), None)}), {sum(extra.values())} extra (e.g. {next(iter(extra), None)})",
+    )
+    return sum(rebuilt.values())
 
 
 def check_sprints(index: GroundTruthIndex) -> int:
@@ -217,6 +293,7 @@ def main(raw_dir: str = "raw_data") -> int:
     try:
         issues = check_issues(index)
         changelogs = check_changelogs(index)
+        rebuilt = check_membership_reconstruction(index)
         sprint_count = check_sprints(index)
     except CheckFailed as failure:
         print(f"FAILED: {failure}")
@@ -224,7 +301,9 @@ def main(raw_dir: str = "raw_data") -> int:
 
     print(f"issues serialized   : {dict(issues)}")
     print(f"changelogs          : {dict(changelogs)} "
-          f"(ground truth: {len(index.collector.status_transitions)} transitions)")
+          f"(ground truth: {len(index.collector.status_transitions)} transitions, "
+          f"{len(index.collector.sprint_issue_memberships)} memberships)")
+    print(f"memberships rebuilt : {rebuilt} from changelogs alone, equal to ground truth")
     print(f"sprints serialized  : {sprint_count}, boundaries contiguous per team")
 
     for spec in ENTITY_SPECS:

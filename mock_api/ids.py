@@ -82,9 +82,23 @@ def sprint_id(ground_truth_sprint_id: str) -> int:
     return _numeric("sprint", ground_truth_sprint_id)
 
 
-def changelog_id(transition_id: str) -> str:
-    """Return the changelog history `id` for a transition, a numeric string."""
-    return str(_numeric("changelog", transition_id))
+def changelog_id(history_key: str) -> str:
+    """Return the changelog history `id`, a numeric string.
+
+    Args:
+        history_key: A transition_id for a status history, or the result
+            of `membership_changelog_key` for a sprint history.
+    """
+    return str(_numeric("changelog", history_key))
+
+
+def membership_changelog_key(ground_truth_issue_id: str, ground_truth_sprint_id: str) -> str:
+    """Return the key a sprint membership's changelog history is derived from.
+
+    A membership has no ID of its own; the (issue, sprint) pair is its
+    identity. The prefix keeps the key out of the transition_id space.
+    """
+    return f"membership:{ground_truth_issue_id}:{ground_truth_sprint_id}"
 
 
 def assert_unique(kind: str, ground_truth_ids: Iterable[str], derive: Callable[[str], object]) -> None:

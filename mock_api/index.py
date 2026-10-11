@@ -14,13 +14,14 @@ copy that exists.
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 
 from mock_api import ids
 from simulator.collector import DataCollector
 from simulator.issues import Issue, StatusTransition
 from simulator.persistence import load_from_json
-from simulator.sprints import Sprint
+from simulator.sprints import Sprint, SprintIssueMembership
 from simulator.teams import Team
 from simulator.users import User
 
@@ -36,6 +37,8 @@ class GroundTruthIndex:
         issues: Issue by issue_id.
         issues_by_key: Issue by Jira issue key.
         transitions_by_issue: Each issue's transitions, oldest first.
+        memberships_by_issue: Each issue's sprint memberships, earliest
+            added_at first.
         sprints_by_issue: Each issue's sprints, earliest start first.
     """
 
@@ -57,11 +60,15 @@ class GroundTruthIndex:
             for issue_id, rows in transitions.items()
         }
 
-        memberships: dict[str, list[Sprint]] = defaultdict(list)
+        memberships: dict[str, list[SprintIssueMembership]] = defaultdict(list)
         for membership in collector.sprint_issue_memberships:
-            memberships[membership.issue_id].append(self.sprints[membership.sprint_id])
+            memberships[membership.issue_id].append(membership)
+        self.memberships_by_issue: dict[str, list[SprintIssueMembership]] = {
+            issue_id: sorted(rows, key=lambda m: m.added_at)
+            for issue_id, rows in memberships.items()
+        }
         self.sprints_by_issue: dict[str, list[Sprint]] = {
-            issue_id: sorted(rows, key=lambda s: s.start_date)
+            issue_id: sorted((self.sprints[m.sprint_id] for m in rows), key=lambda s: s.start_date)
             for issue_id, rows in memberships.items()
         }
 
@@ -72,11 +79,46 @@ class GroundTruthIndex:
         ids.assert_unique("project", self.teams, ids.project_id)
         ids.assert_unique("board", self.teams, ids.board_id)
         ids.assert_unique("sprint", self.sprints, ids.sprint_id)
+        # Status and sprint histories share one changelog ID space, so
+        # they are checked together. A repeated (issue, sprint)
+        # membership derives a repeated key and is caught here too.
         ids.assert_unique(
             "changelog",
-            (t.transition_id for t in collector.status_transitions),
+            [t.transition_id for t in collector.status_transitions]
+            + [
+                ids.membership_changelog_key(m.issue_id, m.sprint_id)
+                for m in collector.sprint_issue_memberships
+            ],
             ids.changelog_id,
         )
+        for issue_id in self.issues:
+            self._assert_distinct_history_instants(issue_id)
+
+    def _assert_distinct_history_instants(self, issue_id: str) -> None:
+        """Raise if two of an issue's changelog events share a millisecond.
+
+        Changelog timestamps carry millisecond precision, so two events
+        within the same millisecond would serialize to identical
+        `created` values and their order in the changelog would be
+        arbitrary. Every status transition and every sprint membership
+        becomes one history, so all of them are compared together.
+
+        Args:
+            issue_id: The issue whose events are checked.
+
+        Raises:
+            ValueError: On the first shared millisecond found.
+        """
+        instants = [t.timestamp for t in self.transitions_by_issue.get(issue_id, [])]
+        instants += [m.added_at for m in self.memberships_by_issue.get(issue_id, [])]
+        seen: set[datetime] = set()
+        for instant in instants:
+            millisecond = instant.replace(microsecond=instant.microsecond // 1000 * 1000)
+            if millisecond in seen:
+                raise ValueError(
+                    f"issue {issue_id!r} has two changelog events at {millisecond.isoformat()}"
+                )
+            seen.add(millisecond)
 
     @classmethod
     def from_json(cls, input_dir: Path | str) -> GroundTruthIndex:
@@ -100,6 +142,17 @@ class GroundTruthIndex:
             The transitions, empty for an issue that never left To Do.
         """
         return self.transitions_by_issue.get(issue.issue_id, [])
+
+    def memberships_for(self, issue: Issue) -> list[SprintIssueMembership]:
+        """Return an issue's sprint memberships, earliest added_at first.
+
+        Args:
+            issue: The issue whose memberships are wanted.
+
+        Returns:
+            The memberships, empty for an issue never pulled into a sprint.
+        """
+        return self.memberships_by_issue.get(issue.issue_id, [])
 
     def sprints_for(self, issue: Issue) -> list[Sprint]:
         """Return the sprints an issue has been a member of, earliest first.
