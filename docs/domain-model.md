@@ -8,6 +8,8 @@ The simulator produces one rich, internally-consistent **ground truth** — ever
 
 This means: build the simulator's internal model first, independent of any Jira JSON shape. Write the Jira-shaped serialization as a separate layer on top.
 
+**The changelog carries both status and sprint items.** `GET /issue/{key}/changelog` emits one history per STATUS_TRANSITION (`field: "status"`) *and* one per SPRINT_ISSUE_MEMBERSHIP (`field: "Sprint"`, `fieldId: "customfield_10020"`), merged in chronological order. The sprint items aren't decoration — they're the only place in the Jira-shaped payload that says *when* an issue joined a sprint, so the ingestion layer derives committed vs. scope-added from them (comparing each sprint item's timestamp against the sprint's `startDate`), the same way real Jira integrations do.
+
 ## Entities and relationships
 
 ```mermaid
@@ -137,9 +139,13 @@ Real Jira exposes story points as an opaque custom field (e.g. `customfield_1001
 
 These numbers are **not** native fields on a Sprint object in real Jira — they're computed by Jira's Sprint Report, by comparing which issues were in the sprint at start vs. end. That report endpoint is part of the (semi-legacy, less formally documented) Jira Software API — worth a dedicated fidelity check later if exact field names matter. Conceptually, in this project:
 
-- **Committed** = sum of `story_points` for issues where `SPRINT_ISSUE_MEMBERSHIP.added_at` is at/before sprint start
-- **Scope added** = sum of `story_points` for issues where `added_at` is after sprint start
-- **Completed** = sum of `story_points` for issues whose `resolutiondate` is set and falls on or before sprint end. (In implementation, this reads the denormalized `Issue.resolutiondate` field directly rather than querying `STATUS_TRANSITION` history — equivalent in practice, since `resolutiondate` is only ever set at the same instant the "→ Done" transition is recorded, but worth naming accurately since it's a real implementation choice, not just a conceptual shorthand.)
+All three compare **exact timestamps**, not calendar days. `SPRINT.start_date`/`end_date` are stored as dates, but the simulator cuts sprints at the start of a workday (09:00), so the sprint start and end *instants* are those dates at 09:00 — and one sprint's end instant is the next sprint's start instant. The mock API's sprint `startDate`/`endDate` use the same instants, so these figures match what a client computes from the API payload.
+
+- **Committed** = sum of `story_points` for issues where `SPRINT_ISSUE_MEMBERSHIP.added_at` <= the sprint start timestamp
+- **Scope added** = sum of `story_points` for issues where `added_at` > the sprint start timestamp
+- **Completed** = sum of `story_points` for issues whose `resolutiondate` is set and is <= the sprint end timestamp. (In implementation, this reads the denormalized `Issue.resolutiondate` field directly rather than querying `STATUS_TRANSITION` history — equivalent in practice, since `resolutiondate` is only ever set at the same instant the "→ Done" transition is recorded, but worth naming accurately since it's a real implementation choice, not just a conceptual shorthand.)
+
+*(Earlier versions compared calendar days — `added_at.date() <= start_date`, `resolutiondate.date() <= end_date`. That counted scope added later on the start day as committed, and work resolved after 09:00 on the end day as completed in a sprint that had already ended. Switching to timestamps lowers every team's hit rate; parameters were not retuned for it.)*
 
 `sprint_report.py`'s actual output also includes `hit` (whether `completed >= committed` for that sprint — see the Block 5 decision log entry below) and a per-sprint bug count / total issue count, used for the bug-ratio business question. These aren't part of the three core formulas above but are computed alongside them.
 
@@ -158,10 +164,21 @@ This is the key architectural asymmetry in the pipeline:
 
 Sprint planning releases all committed work simultaneously at sprint start, rather than staggering it gradually. This creates a predictable early-sprint queue — developers near 100% utilized in the first ~2 days, tapering to ~43% by sprint end — that accounts for part of the low capacity-realization factor in `sprint_cycle.py`: some of that factor compensates for this start-of-sprint burst rather than purely for real-world overhead like rework and scope creep. Diagnosed via direct developer-pool sampling across a 12-sprint run. Not fixed in v1, since it doesn't affect the correctness of committed/completed/scope-added calculations, only the shape of within-sprint utilization. A v1.1 improvement would stagger committed-issue start times with a small random delay to spread the release instead of firing all at once.
 
+## Known v1 limitations
+
+Deliberate simplifications in the current simulator and data model. None of them blocks the six business questions, but each is a place where the data is less realistic than a real Jira instance — worth naming accurately, same honesty standard as the decisions above.
+
+- **One team per user.** `USER.team_id` is a single foreign key, so every user belongs to exactly one team. Real organizations have people who split time across teams (a shared QA engineer, a platform specialist); the model can't express that today.
+- **PTO tracked at team level only.** CAPACITY records `pto_days` as one number per team per sprint. There's no record of *which* user was out, so per-person availability questions can't be answered — only "how much capacity did this team lose this sprint."
+- **Fixed sprint length, no extension tracking.** Every sprint runs exactly ten working days. Real teams sometimes extend or close a sprint early; nothing in the model records a planned-vs-actual end date, so that behavior can't be generated or analyzed.
+- **No carryover of unfinished issues.** An issue that isn't Done by sprint end stays in its original sprint and is never rolled into the next one. The schema permits multi-sprint membership (see SPRINT_ISSUE_MEMBERSHIP above) and the mock API's changelog handles it correctly, but no generator process creates it — so "how often does work spill over" isn't answerable from the current data.
+- **Epics never change status.** Epics are created as parents for other issues but never move through the workflow — every Epic stays in To Do for the whole simulation, even when all of its children are Done. Real teams usually close Epics once their child work ships.
+- **Priority is deliberately out of scope for v1.** None of the six business questions needs it, and a field that doesn't influence anything would be decoration: a meaningful version needs priority-aware queueing (high-priority issues jumping the backlog and the developer pool) and then a recalibration of the team personalities, since queueing order changes cycle times and hit rates. A v1.1 candidate. The mock API correspondingly emits no `priority` field.
+
 ## Open items carried over from this modeling pass
 
 - Exact Sprint Report field names (Jira Software API) — verify later if fidelity matters for the mock API's sprint-report endpoint.
-- Whether `reporter_id` and `priority` are worth modeling for v1 — currently included in the schema for realism but not required by any of the six confirmed business questions.
+- ~~Whether `reporter_id` and `priority` are worth modeling for v1.~~ Resolved: `reporter_id` is modeled; `priority` is out of scope for v1 (see "Known v1 limitations" above).
 
 ## Multi-team personality parameterization (decision)
 

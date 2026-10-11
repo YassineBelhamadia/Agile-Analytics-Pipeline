@@ -16,12 +16,33 @@ calling this rather than by inventing numbers of its own.
 
 from __future__ import annotations
 
+from datetime import date, datetime, time
 from typing import Any
 
+from simulator.clock import WORK_START_HOUR
 from simulator.collector import DataCollector
 from simulator.sprints import Sprint
 
 BUG = "Bug"
+
+
+def sprint_boundary(day: date) -> datetime:
+    """Return the instant a sprint boundary on `day` actually happened.
+
+    Sprint stores its start and end as bare dates, but the simulator cuts
+    sprints at the start of a workday: committed memberships are stamped
+    at exactly this instant, and one sprint's end is the next sprint's
+    start. The mock API pins its sprint `startDate`/`endDate` to the same
+    hour, so figures computed here agree with what a client reading the
+    payload would compute.
+
+    Args:
+        day: A sprint's start_date or end_date.
+
+    Returns:
+        That date at the start of the workday.
+    """
+    return datetime.combine(day, time(WORK_START_HOUR))
 
 
 def compute_sprint_report(sprint: Sprint, collector: DataCollector) -> dict[str, Any]:
@@ -35,8 +56,8 @@ def compute_sprint_report(sprint: Sprint, collector: DataCollector) -> dict[str,
     - **Scope added** is the points of issues that joined after the start
       — work pulled in mid-sprint, which is why SprintIssueMembership
       records `added_at` at all.
-    - **Completed** is the points of member issues resolved on or before
-      the sprint end date.
+    - **Completed** is the points of member issues resolved at or before
+      the sprint end.
 
     A sprint counts as hit when completed points reach the committed
     figure. Note that completed work includes scope-added issues, so a
@@ -45,10 +66,11 @@ def compute_sprint_report(sprint: Sprint, collector: DataCollector) -> dict[str,
     ambiguity in this metric, and one reason the scope-added figure is
     reported alongside rather than folded in.
 
-    The date-level comparison is inherited from the domain model's
-    formulas. One consequence worth knowing: a scope add that lands on
-    the sprint's own start date is indistinguishable from committed work
-    at this granularity and will be counted as committed.
+    All three compare exact datetimes against the sprint's boundary
+    instants (see `sprint_boundary`), not calendar days. Comparing by day
+    would count a scope add later on the start date as committed, and
+    count work resolved later on the end date as completed in a sprint
+    that had already ended.
 
     Args:
         sprint: The sprint to report on.
@@ -66,20 +88,23 @@ def compute_sprint_report(sprint: Sprint, collector: DataCollector) -> dict[str,
         if membership.sprint_id == sprint.sprint_id
     ]
 
+    start = sprint_boundary(sprint.start_date)
+    end = sprint_boundary(sprint.end_date)
+
     committed = sum(
         issue.story_points
         for membership, issue in members
-        if membership.added_at.date() <= sprint.start_date
+        if membership.added_at <= start
     )
     scope_added = sum(
         issue.story_points
         for membership, issue in members
-        if membership.added_at.date() > sprint.start_date
+        if membership.added_at > start
     )
     completed = sum(
         issue.story_points
         for _, issue in members
-        if issue.resolutiondate is not None and issue.resolutiondate.date() <= sprint.end_date
+        if issue.resolutiondate is not None and issue.resolutiondate <= end
     )
 
     return {
