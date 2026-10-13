@@ -422,6 +422,36 @@ def serialize_changelog(
     return payload
 
 
+def serialize_board(team: Team) -> dict:
+    """Build one board object, as GET /rest/agile/1.0/board lists it.
+
+    The ground truth has no board entity: each team runs exactly one
+    Scrum board on its own project, so the board is derived from the team.
+    The name follows Jira's default for a new board, "<KEY> board".
+
+    Args:
+        team: The ground-truth team whose board this is.
+
+    Returns:
+        The Jira-shaped board payload.
+    """
+    bid = ids.board_id(team.team_id)
+    return {
+        "id": bid,
+        "self": f"{AGILE_API}/board/{bid}",
+        "name": f"{team.key} board",
+        "type": "scrum",
+        "location": {
+            "projectId": int(ids.project_id(team.team_id)),
+            "projectKey": team.key,
+            "projectName": team.name,
+            "projectTypeKey": "software",
+            "displayName": f"{team.name} ({team.key})",
+            "name": f"{team.name} ({team.key})",
+        },
+    }
+
+
 def serialize_sprint(sprint: Sprint) -> dict:
     """Build the GET /rest/agile/1.0/sprint/{sprintId} body for one sprint.
 
