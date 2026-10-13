@@ -2,6 +2,8 @@
 
 A FastAPI server that answers a small set of Jira Cloud REST endpoints from the simulator's ground truth. Nothing is stored in Jira's shape: each response is built on request by the serializers in `serializers.py`, which project the entities loaded from `raw_data/` (see `docs/domain-model.md`, "Core principle: ground truth vs. views").
 
+Full reference, covering endpoints, pagination, JQL, errors, what is verified and what is assumed: [`docs/mock-api.md`](../docs/mock-api.md).
+
 ## 1. Generate the data
 
 The server reads the seven JSON files in `raw_data/` at the repository root. They're generated, not committed:
