@@ -13,7 +13,7 @@ defensible in an interview, including the options we rejected.
 ## Read these first
 - `docs/domain-model.md`: entities, relationships, sprint metric definitions, calibration, v1 limitations
 - `docs/mock-api.md`: endpoints, pagination, what is verified vs. assumed
-- `docs/stack.md`: tool choices and what is deferred (created in ETL Session 1)
+- `docs/stack.md`: tool choices, reasons, and what is deferred
 
 ## Repo layout
 - `simulator/`: SimPy simulator, per-team random streams, persistence. Done. Do not touch unless asked.
@@ -32,7 +32,8 @@ defensible in an interview, including the options we rejected.
 - dbt Core for transformations and data tests.
 - GitHub Actions for CI.
 - Power BI for the dashboard.
-- Deferred: orchestration (Airflow or similar), after the v1 ETL works end to end.
+- Deferred: orchestration (Airflow or similar), after the v1 ETL works end to end; the
+  dbt vs. plain SQL write-up, until the dbt project exists (see `docs/stack.md`).
 
 ## Architecture principles
 - **Ground truth vs. views.** The simulator holds one internal model. The mock API never stores
@@ -58,6 +59,13 @@ defensible in an interview, including the options we rejected.
 - Epics have null story points and never change status. Exclude them from cycle-time and
   time-in-status metrics.
 - No `priority` field in v1, on purpose (see domain-model.md).
+- `issues.json` carries `duedate`, set when an issue first joins a sprint: Story/Task = the
+  sprint's last workday, Bug = 5 workdays after joining, capped there (authored policy, not
+  tuned). Epics and never-scheduled issues stay null. Rule: domain-model.md, "Deadline (duedate) rule".
+- Breach (business question 3), issues with a duedate only: breached if
+  `resolutiondate.date() > duedate`, or unresolved with duedate before the as-of date (last
+  timestamp in the data). Report resolved-only and incl. past due; exclude not-yet-due and
+  null duedates. Split by committed vs. scope-added: hit rate and breach measure different things.
 - Every request needs an `Authorization` header (Basic or Bearer, any non-empty value).
 
 ## Sprint metric definitions (exact timestamps, never calendar days)
@@ -69,7 +77,8 @@ defensible in an interview, including the options we rejected.
 
 ## Shipped dataset (SEED=22): verification targets
 3 teams, 12 users, 36 sprints, 36 capacity rows, 530 issues, 1,488 status transitions,
-320 sprint memberships. Extraction, staging and warehouse counts must match these.
+320 sprint memberships, 320 issues with a duedate (210 null). Extraction, staging and warehouse
+counts must match these.
 - Calibration seeds 1-60, held-out seeds 61-100 (`simulator/calibration.py`). Results live
   in domain-model.md; do not copy them here.
 - If SEED or any personality parameter changes, regenerate and update these numbers here

@@ -149,6 +149,28 @@ All three compare **exact timestamps**, not calendar days. `SPRINT.start_date`/`
 
 `sprint_report.py`'s actual output also includes `hit` (whether `completed >= committed` for that sprint — see the Block 5 decision log entry below) and a per-sprint bug count / total issue count, used for the bug-ratio business question. These aren't part of the three core formulas above but are computed alongside them.
 
+## Deadline (duedate) rule (decision)
+
+An issue gets a `duedate` when it first joins a sprint (`assign_duedate` in `simulator/sprint_cycle.py`, called at sprint planning and at mid-sprint scope adds):
+
+- **Story and Task:** due on the sprint's last workday, the workday before `end_date`. Work happens only during working hours, so `resolutiondate.date() <= duedate` gives the same answer as the exact sprint-end comparison. `mock_api.verify.check_duedates` confirms this for every resolved Story and Task.
+- **Bug:** due `BUG_DEADLINE_WORKDAYS = 5` workdays after the day it joined, capped at the sprint's last workday.
+- **No due date:** Epics (never in a sprint) and issues never pulled into a sprint keep `duedate = null`.
+- **Repeat memberships:** only the first membership sets the date. None exist today, since there is no carryover.
+
+The 5-workday bug SLA is an **authored policy**, fixed before any breach rate was measured. It is not calibrated and must not be tuned to hit a target. The rule draws no random numbers, so adding it changed only the `duedate` field. Every other generated value is byte-identical.
+
+**Breach definition** (business question 3), for issues with a non-null `duedate`:
+
+- **Breached:** resolved with `resolutiondate.date() > duedate`, or unresolved at the as-of date with `duedate` before it.
+- **On time:** resolved with `resolutiondate.date() <= duedate`.
+- **Excluded:** unresolved and not yet due (censored), and every issue with a null `duedate`.
+- **Two rates:** report *resolved only* and *including unresolved past due*. The as-of date is the last timestamp in the data.
+
+In the shipped dataset (SEED=22), 320 issues have a due date (155 Story, 76 Task, 89 Bug) and 210 don't (30 Epics, 180 never scheduled). Resolved-only breach rates: Story 20.4%, Task 28.9%, Bug 38.8%.
+
+**Breach is not the inverse of sprint hit.** Hit compares *completed* points with *committed* points, so late scope-added work barely affects it. Breach counts every issue with a deadline, scope-added ones included, and scope-added issues join with less time left. Atlas shows the gap: the best hit rate (9/12) but the highest breach rate (33%). Its committed issues are the most punctual of the three teams (14% late). Its scope-added issues are late 64% of the time, because scope adds arrive at the same rate for every team (`SCOPE_ADD_POISSON_MEAN`), which adds 65% on top of Atlas's small commitment. Only one of Atlas's nine hits relies on completed scope-added points covering unfinished committed ones. Split breach by committed vs. scope-added when presenting it.
+
 ## Ingestion split: Jira-shaped data vs. Capacity data (decision)
 
 This is the key architectural asymmetry in the pipeline:

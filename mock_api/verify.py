@@ -16,7 +16,7 @@ import copy
 import json
 import sys
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
 
 from mock_api import ids
 from mock_api.config import SPRINT_FIELD, STATUS_IDS, STORY_POINTS_FIELD
@@ -28,6 +28,7 @@ from mock_api.serializers import (
     serialize_issue,
     serialize_sprint,
 )
+from simulator.clock import WORK_START_HOUR
 from simulator.persistence import ENTITY_SPECS
 
 JIRA_TS_FORMAT = "%Y-%m-%dT%H:%M:%S.%f%z"
@@ -127,6 +128,70 @@ def check_issues(index: GroundTruthIndex) -> Counter:
 
         tally[issue.issue_type] += 1
         tally["total"] += 1
+    return tally
+
+
+BUG_DEADLINE_WORKDAYS = 5
+"""The bug SLA from simulator/sprint_cycle.py, restated so the check does not import the rule it checks."""
+
+
+def _workday(d: date) -> bool:
+    return d.weekday() < 5
+
+
+def _last_workday_before(d: date) -> date:
+    d -= timedelta(days=1)
+    while not _workday(d):
+        d -= timedelta(days=1)
+    return d
+
+
+def _workdays_after(d: date, n: int) -> date:
+    for _ in range(n):
+        d += timedelta(days=1)
+        while not _workday(d):
+            d += timedelta(days=1)
+    return d
+
+
+def check_duedates(index: GroundTruthIndex) -> Counter:
+    """Check every serialized duedate against the deadline rule, derived independently.
+
+    Rule (docs/domain-model.md, "Deadline (duedate) rule"): an issue gets a
+    due date when it first joins a sprint. Story and Task are due on the
+    sprint's last workday; Bug is due 5 workdays after the day it joined,
+    capped at the sprint's last workday. Issues never in a sprint, which
+    includes every Epic, have no due date.
+    """
+    tally: Counter = Counter()
+    for issue in index.issues.values():
+        payload_due = serialize_issue(issue, index)["fields"]["duedate"]
+        memberships = index.memberships_for(issue)
+        where = issue.key
+        if not memberships:
+            check(payload_due is None, f"{where}: due date set on an issue never in a sprint")
+            tally["no sprint, null"] += 1
+            continue
+        check(issue.issue_type != "Epic", f"{where}: an Epic is in a sprint")
+        first = memberships[0]
+        sprint = index.sprints[first.sprint_id]
+        last_workday = _last_workday_before(sprint.end_date)
+        if issue.issue_type == "Bug":
+            expected = min(_workdays_after(first.added_at.date(), BUG_DEADLINE_WORKDAYS), last_workday)
+        else:
+            expected = last_workday
+        check(payload_due is not None, f"{where}: in a sprint but has no due date")
+        due = date.fromisoformat(payload_due)
+        check(due == expected, f"{where}: due date {due}, rule gives {expected}")
+        check(due >= first.added_at.date(), f"{where}: due date before it joined the sprint")
+        check(due <= last_workday, f"{where}: due date {due} after the sprint's last workday {last_workday}")
+        if issue.resolutiondate is not None and issue.issue_type != "Bug":
+            sprint_end = datetime.combine(sprint.end_date, time(WORK_START_HOUR))
+            check(
+                (issue.resolutiondate.date() <= due) == (issue.resolutiondate <= sprint_end),
+                f"{where}: date rule disagrees with the exact sprint-end comparison",
+            )
+        tally[f"{issue.issue_type} with due date"] += 1
     return tally
 
 
@@ -292,6 +357,7 @@ def main(raw_dir: str = "raw_data") -> int:
 
     try:
         issues = check_issues(index)
+        duedates = check_duedates(index)
         changelogs = check_changelogs(index)
         rebuilt = check_membership_reconstruction(index)
         sprint_count = check_sprints(index)
@@ -300,6 +366,7 @@ def main(raw_dir: str = "raw_data") -> int:
         return 1
 
     print(f"issues serialized   : {dict(issues)}")
+    print(f"due dates           : {dict(duedates)}, all match the rule")
     print(f"changelogs          : {dict(changelogs)} "
           f"(ground truth: {len(index.collector.status_transitions)} transitions, "
           f"{len(index.collector.sprint_issue_memberships)} memberships)")

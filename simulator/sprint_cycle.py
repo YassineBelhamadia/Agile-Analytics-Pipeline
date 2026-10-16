@@ -27,12 +27,13 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Generator, Sequence
+from datetime import date, datetime
 
 import numpy as np
 import simpy
 
 from simulator.arrivals import ARRIVAL_RATE_PER_HOUR, BUG, ISSUE_TYPE_WEIGHTS
-from simulator.clock import WORK_HOURS_PER_DAY, sim_to_real
+from simulator.clock import WORK_HOURS_PER_DAY, add_workdays, previous_workday, sim_to_real
 from simulator.collector import DataCollector
 from simulator.issues import Issue
 from simulator.lifecycle import HOURS_PER_POINT, QA_BOUNCE_PROBABILITY, issue_lifecycle
@@ -295,6 +296,60 @@ def pto_process(
         yield env.timeout(pto_hours)
 
 
+BUG_DEADLINE_WORKDAYS = 5
+"""Workdays a Bug has, from joining a sprint, before it is due.
+
+An authored policy, not a calibrated parameter: it was fixed before any
+breach rate was measured and must not be tuned to hit a target. Bugs get
+a shorter deadline than the sprint itself because teams commonly expect
+defects to be turned around faster than planned work. The deadline is
+capped at the sprint's last workday (see `assign_duedate`).
+"""
+
+
+def sprint_last_workday(sprint: Sprint) -> date:
+    """Return the last workday inside a sprint.
+
+    A sprint ends at the start of the workday that opens the next sprint
+    (see sprint_report.sprint_boundary), so its last day of work is the
+    workday before `end_date`. Work only happens within working hours, so
+    `resolutiondate.date() <= sprint_last_workday(sprint)` holds exactly
+    when the issue was resolved before the sprint's end instant.
+    """
+    return previous_workday(sprint.end_date)
+
+
+def assign_duedate(issue: Issue, sprint: Sprint, added_at: datetime) -> None:
+    """Set an issue's due date when it joins a sprint.
+
+    - Story and Task: due on the sprint's last workday.
+    - Bug: due BUG_DEADLINE_WORKDAYS workdays after the day it joined,
+      but never later than the sprint's last workday.
+    - Epic: never reaches here. Epics never enter the backlog, so they
+      never join a sprint and keep a null due date.
+
+    Only the first membership sets the due date; a later one leaves it
+    alone. No issue joins more than one sprint today (there is no
+    carryover), so that branch is never taken — it exists so carryover,
+    if added, does not silently move deadlines.
+
+    Deterministic: no random draws, so no team's random stream moves.
+
+    Args:
+        issue: The issue joining the sprint. Mutated in place, as its
+            status and resolutiondate are by the lifecycle.
+        sprint: The sprint it joins.
+        added_at: When it joined.
+    """
+    if issue.duedate is not None:
+        return
+    last_workday = sprint_last_workday(sprint)
+    if issue.issue_type == BUG:
+        issue.duedate = min(add_workdays(added_at.date(), BUG_DEADLINE_WORKDAYS), last_workday)
+    else:
+        issue.duedate = last_workday
+
+
 def scope_add_issue_process(
     env: simpy.Environment,
     offset_hours: float,
@@ -342,11 +397,12 @@ def scope_add_issue_process(
         return
 
     issue = backlog.popleft()
-    collector.record_sprint_membership(
+    membership = collector.record_sprint_membership(
         issue_id=issue.issue_id,
         sprint_id=sprint.sprint_id,
         added_at=sim_to_real(env.now),
     )
+    assign_duedate(issue, sprint, membership.added_at)
     env.process(
         issue_lifecycle(
             env,
@@ -500,6 +556,7 @@ def sprint_cycle_process(
                 sprint_id=sprint.sprint_id,
                 added_at=sprint_start,
             )
+            assign_duedate(issue, sprint, sprint_start)
             env.process(
                 issue_lifecycle(
                     env,

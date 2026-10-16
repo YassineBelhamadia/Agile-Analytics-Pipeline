@@ -69,7 +69,7 @@ With no parameters, the response equals `serialize_issue`'s output exactly [V29]
     "assignee": {"self": "http://localhost:8000/rest/api/3/user?accountId=44acdcc69d2d77d59f40e296", "accountId": "44acdcc69d2d77d59f40e296", "accountType": "atlassian", "displayName": "Phoenix Dev 5", "active": true},
     "reporter": {"self": "...", "accountId": "57d1870b2aa0b36f3728e8fc", "accountType": "atlassian", "displayName": "Phoenix Dev 1", "active": true},
     "created": "2024-01-25T11:10:00.767+0000",
-    "duedate": null,
+    "duedate": "2024-02-16",
     "resolutiondate": "2024-02-12T13:11:43.221+0000",
     "customfield_10016": 3,
     "customfield_10020": [
@@ -89,6 +89,7 @@ With no parameters, the response equals `serialize_issue`'s output exactly [V29]
 - `customfield_10016` holds story points, and is `null` for Epics (`_story_points`). [V4]
 - `customfield_10020` lists the issue's sprints, or is `null` if it has none (`_sprint_field_entry`). [V10]
 - `parent` is present only for issues that have a parent; it is omitted, not null, otherwise (`_parent`). [V9]
+- `duedate` is a plain date set by the simulator's deadline rule, and `null` for issues never in a sprint, including every Epic ([`docs/domain-model.md`](domain-model.md), "Deadline (duedate) rule"). [V43]
 - Status IDs come from `STATUS_IDS` in config.py: To Do `10000`, In Progress `10001`, Code Review `10002`, QA `10003`, Done `10004`. [V1, V5]
 - Issue type IDs come from `ISSUE_TYPES`: Epic `10100`, Story `10101`, Task `10102`, Bug `10103`. [V7]
 
@@ -388,6 +389,7 @@ Two scripts make up the suite:
 | V40 | 400 for each of the 9 rejected JQL queries in [section 5](#5-supported-jql). | `verify_app.check_errors` |
 | V41 | Every error response above has exactly `errorMessages` (list) and `errors` (object), not both empty. | `verify_app.is_jira_error` (from `check_errors`) |
 | V42 | A missing `raw_data/` directory stops startup with a `RuntimeError` that names `generate_raw_data.py`. | `verify_app.check_refuses_to_start` |
+| V43 | Every serialized `duedate` matches the deadline rule, re-derived independently from the memberships: null for issues never in a sprint, sprint's last workday for Story and Task, joined + 5 workdays capped there for Bug. For resolved Stories and Tasks, the date comparison agrees with the exact sprint-end comparison. | `verify.check_duedates` |
 
 **Implemented but not covered by the suite.** These are stated from the code only:
 
@@ -480,6 +482,7 @@ Expected output of `python -m mock_api.verify`:
 ```
 status coverage     : all 5 statuses mapped ['Code Review', 'Done', 'In Progress', 'QA', 'To Do']
 issues serialized   : {'no parent': 323, 'in a sprint': 320, 'Bug': 141, 'total': 530, 'Story': 230, 'Task': 129, 'unresolved': 217, 'Epic': 30, 'with parent': 207}
+due dates           : {'Bug with due date': 89, 'Story with due date': 155, 'Task with due date': 76, 'no sprint, null': 210}, all match the rule
 changelogs          : {'status histories': 1488, 'sprint histories': 320, 'issues with history': 320, 'issues with no history': 210} (ground truth: 1488 transitions, 320 memberships)
 memberships rebuilt : 320 from changelogs alone, equal to ground truth
 sprints serialized  : 36, boundaries contiguous per team

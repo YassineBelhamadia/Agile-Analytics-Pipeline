@@ -94,6 +94,42 @@ def _advance_workdays(start: date, num_days: int) -> date:
     return current
 
 
+def add_workdays(start: date, num_days: int) -> date:
+    """Return the date `num_days` workdays after `start`, skipping weekends.
+
+    The public form of the calendar arithmetic `sim_to_real` uses, for
+    callers outside this module that need a date some number of working
+    days out — a deadline, say.
+
+    Args:
+        start: The date to count from. Assumed to be a workday itself.
+        num_days: How many workdays to add. Zero returns `start`.
+
+    Returns:
+        The resulting date, a workday.
+    """
+    return _advance_workdays(start, num_days)
+
+
+def previous_workday(d: date) -> date:
+    """Return the last workday strictly before `d`.
+
+    A sprint ends at the start of the workday that opens the next sprint,
+    so the last day of work inside a sprint is the workday before its
+    end date.
+
+    Args:
+        d: Any calendar date.
+
+    Returns:
+        The closest Monday-Friday date before `d`.
+    """
+    current = d - timedelta(days=1)
+    while not is_workday(current):
+        current -= timedelta(days=1)
+    return current
+
+
 def sim_to_real(sim_hours: float) -> datetime:
     """Convert a SimPy working-hours clock reading into a real datetime.
 
