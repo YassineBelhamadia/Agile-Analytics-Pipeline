@@ -19,9 +19,9 @@ defensible in an interview, including the options we rejected.
 - `simulator/`: SimPy simulator, per-team random streams, persistence. Done. Do not touch unless asked.
 - `scripts/generate_raw_data.py`: runs the simulation and writes `raw_data/`
 - `raw_data/`: generated ground truth. Gitignored, regenerable.
-- `mock_api/`: FastAPI app serving Jira-shaped endpoints from `raw_data/`. Done except capacity.
+- `mock_api/`: FastAPI app serving Jira-shaped endpoints plus `/capacity` from `raw_data/`. Done.
 - `ingestion/`: extraction client, then parsing into staging. In progress.
-- `warehouse/`: Postgres in Docker, then the dbt project. In progress.
+- `warehouse/`: `docker-compose.yml` for Postgres (written; live smoke check pending), then the dbt project.
 - `dashboard/`: Power BI. Later.
 - `docs/`: documentation, the source of truth for decisions.
 
@@ -67,6 +67,9 @@ defensible in an interview, including the options we rejected.
   timestamp in the data). Report resolved-only and incl. past due; exclude not-yet-due and
   null duedates. Split by committed vs. scope-added: hit rate and breach measure different things.
 - Every request needs an `Authorization` header (Basic or Bearer, any non-empty value).
+- `GET /capacity` (our own schema, not Jira): rows `team_key`, `sprint_id` (agile sprint id),
+  `headcount`, `pto_days` (full precision); snake_case; agile-style `startAt`/`maxResults`/
+  `isLast` paging; filters `team`, `sprint`. 36 rows. See docs/mock-api.md section 11.
 
 ## Sprint metric definitions (exact timestamps, never calendar days)
 - Committed: story points of issues with `added_at <= sprint start`
@@ -90,8 +93,9 @@ counts must match these.
 - Verify serializers: `python -m mock_api.verify`
 - Verify API: `python -m mock_api.verify_app`
 - Calibration table: `python -m simulator.calibration`
-- Postgres (after Session 1): `docker compose -f warehouse/docker-compose.yml up -d`,
-  credentials from `.env` (see `.env.example`)
+- Postgres up (postgres:18.6, localhost:5433, credentials from the root `.env`; copy `.env.example`):
+  `docker compose --env-file .env -f warehouse/docker-compose.yml up -d --wait`
+- Postgres smoke check: `python scripts/check_warehouse.py`; down: same compose command with `down`
 
 ## Working rules
 - Never commit or push. Prepare the change and report; I review and commit myself.
@@ -107,7 +111,8 @@ counts must match these.
 - Keep reports short: what changed, verification results, what was assumed, what was left out.
 
 ## Current phase: ETL build, target done by Monday 2026-10-19
-1. Session 1: capacity endpoint, Postgres in Docker, extraction client
+1. Session 1: capacity endpoint (done), Postgres in Docker (compose written, smoke check pending),
+   extraction client
 2. Session 2: parsing and staging tables
 3. Session 3: dbt star schema
 4. Session 4: sprint metrics and the six business questions, reconciled with sprint_report.py

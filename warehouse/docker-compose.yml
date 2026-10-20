@@ -1,0 +1,40 @@
+# PostgreSQL warehouse for the Agile Analytics Pipeline.
+#
+# Start (from the repo root; credentials come from the gitignored .env):
+#   docker compose --env-file .env -f warehouse/docker-compose.yml up -d --wait
+# Stop (data is kept in the named volume):
+#   docker compose --env-file .env -f warehouse/docker-compose.yml down
+# Stop and delete all warehouse data:
+#   docker compose --env-file .env -f warehouse/docker-compose.yml down -v
+
+name: aap-warehouse
+
+services:
+  postgres:
+    # Pinned to an exact release so every machine and CI run gets the same server.
+    image: postgres:18.6
+    environment:
+      # No defaults on purpose: a missing value stops `up` with this message
+      # instead of starting a database with credentials nobody chose.
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER in .env (see .env.example)}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env (see .env.example)}
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB in .env (see .env.example)}
+    ports:
+      # Localhost only. 5433 by default because a locally installed Postgres
+      # commonly already holds 5432.
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      # The postgres:18 images keep their data under /var/lib/postgresql
+      # (in a version-specific subdirectory), so the volume mounts there
+      # rather than at the older /var/lib/postgresql/data.
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  pgdata:
