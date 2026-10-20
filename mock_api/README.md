@@ -64,6 +64,28 @@ Errors use Jira's shape, `{"errorMessages": [...], "errors": {...}}`:
 - **404:** unknown issue, sprint, board or path.
 - **400:** bad parameters (keyed by parameter name in `errors`), unsupported JQL, or an invalid or mismatched `nextPageToken`.
 
+## Capacity endpoint (our own design, not a Jira contract)
+
+`GET /capacity` serves each team's headcount and PTO per sprint. Jira has no capacity API, so this endpoint and its row format are ours (`capacity.py`). It shares only the auth rule, the error body and the agile-style paging with the endpoints above.
+
+| Parameter | Default | Notes |
+|---|---|---|
+| `team` | none | Project key, case-insensitive. Unknown key: 404. |
+| `sprint` | none | Agile sprint ID, the same number as `/rest/agile/1.0/sprint/{sprintId}`. Unknown: 404. Not an integer: 400. |
+| `startAt`, `maxResults` | `0`, `50` | Same rules as the agile endpoints. |
+
+`GET /capacity?maxResults=1`:
+
+```json
+{"maxResults": 1, "startAt": 0, "total": 36, "isLast": false,
+ "values": [{"team_key": "PHX", "sprint_id": 33292371, "headcount": 5, "pto_days": 0.00901022825809017}]}
+```
+
+- **Order:** rows are ordered by team, then by sprint start date.
+- **`pto_days`:** passed through at full precision.
+- **Field names:** snake_case on purpose, to keep this contract visibly separate from Jira's camelCase.
+- **Mismatched filters:** a `team` plus a `sprint` belonging to another team returns an empty page, not an error.
+
 ## Checking it
 
 ```bash

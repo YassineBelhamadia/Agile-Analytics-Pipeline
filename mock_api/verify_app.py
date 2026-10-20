@@ -252,6 +252,76 @@ def check_errors(client: TestClient, catalog) -> str:
     return f"{len(cases)} error cases return the right status and Jira's errorMessages/errors shape"
 
 
+def expected_capacity_rows(catalog) -> list[tuple]:
+    """Capacity rows built straight from the ground truth, not via serialize_capacity."""
+    key = {t.team_id: t.key for t in catalog.teams}
+    return [
+        (key[c.team_id], ids.sprint_id(c.sprint_id), c.headcount, c.pto_days)
+        for c in catalog.index.collector.capacities
+    ]
+
+
+def capacity_rows_match(api_rows: list[dict], expected: list[tuple]) -> bool:
+    """Whether the API rows are exactly the expected rows: same values, each once."""
+    got = Counter((r["team_key"], r["sprint_id"], r["headcount"], r["pto_days"]) for r in api_rows)
+    fields_ok = all(set(r) == {"team_key", "sprint_id", "headcount", "pto_days"} for r in api_rows)
+    return fields_ok and got == Counter(expected)
+
+
+def walk_capacity(client: TestClient, page_size: int, **params) -> list[dict]:
+    rows, start = [], 0
+    while True:
+        page = client.get(
+            "/capacity", params={"startAt": start, "maxResults": page_size, **params}, headers=AUTH
+        ).json()
+        check(set(page) == {"startAt", "maxResults", "total", "isLast", "values"}, "capacity page envelope")
+        rows.extend(page["values"])
+        if page["isLast"]:
+            check(len(rows) == page["total"], "capacity rows walked != total")
+            return rows
+        check(len(page["values"]) == page_size, "non-last capacity page is short")
+        start += page_size
+
+
+def check_capacity(client: TestClient, catalog) -> str:
+    expected = expected_capacity_rows(catalog)
+    check(len(expected) == 36, f"{len(expected)} capacity rows in the ground truth, want 36")
+    for size in (1, 5, 7, 50, 100):
+        check(capacity_rows_match(walk_capacity(client, size), expected), f"capacity rows differ at page size {size}")
+
+    for team in catalog.teams:
+        rows = walk_capacity(client, 5, team=team.key.lower())
+        check(len(rows) == 12 and all(r["team_key"] == team.key for r in rows), f"team filter {team.key}")
+        check(capacity_rows_match(rows, [e for e in expected if e[0] == team.key]), f"team {team.key} rows differ")
+    for sprint in catalog.index.collector.sprints:
+        jira_id = ids.sprint_id(sprint.sprint_id)
+        rows = walk_capacity(client, 50, sprint=jira_id)
+        check(capacity_rows_match(rows, [e for e in expected if e[1] == jira_id]) and len(rows) == 1, f"sprint filter {jira_id}")
+    other_team = next(t.key for t in catalog.teams if t.team_id != catalog.index.collector.sprints[0].team_id)
+    mismatch = client.get(
+        "/capacity", params={"team": other_team, "sprint": ids.sprint_id(catalog.index.collector.sprints[0].sprint_id)}, headers=AUTH
+    ).json()
+    check(mismatch["total"] == 0 and mismatch["values"] == [], "team + sprint of another team should be empty")
+
+    # Sabotage: the row-equality check must reject a changed value and a missing row.
+    rows = walk_capacity(client, 50)
+    tampered = [dict(r) for r in rows]
+    tampered[0]["pto_days"] += 0.5
+    check(not capacity_rows_match(tampered, expected), "row check accepted a changed pto_days")
+    check(not capacity_rows_match(rows[1:], expected), "row check accepted a missing row")
+
+    for label, response, status in (
+        ("no auth", client.get("/capacity"), 401),
+        ("unknown team", client.get("/capacity", params={"team": "ZZZ"}, headers=AUTH), 404),
+        ("unknown sprint", client.get("/capacity", params={"sprint": 1}, headers=AUTH), 404),
+        ("non-integer sprint", client.get("/capacity", params={"sprint": "abc"}, headers=AUTH), 400),
+        ("maxResults=0", client.get("/capacity", params={"maxResults": 0}, headers=AUTH), 400),
+        ("negative startAt", client.get("/capacity", params={"startAt": -1}, headers=AUTH), 400),
+    ):
+        check(is_jira_error(response, status), f"capacity {label}: got {response.status_code} {response.text[:200]}")
+    return "36 rows at page sizes 1, 5, 7, 50, 100; team and sprint filters exact; sabotage caught; 6 error cases"
+
+
 def check_refuses_to_start() -> str:
     try:
         with TestClient(create_app("/nonexistent/raw_data")):
@@ -272,6 +342,7 @@ def main(raw_dir: str = "raw_data") -> int:
                 ("issues", check_issues),
                 ("agile", check_agile),
                 ("errors", check_errors),
+                ("capacity", check_capacity),
             ):
                 print(f"{name:<10}: {run(client, catalog)}")
         print(f"{'startup':<10}: {check_refuses_to_start()}")

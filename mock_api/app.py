@@ -33,6 +33,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from mock_api import ids, jql
+from mock_api.capacity import serialize_capacity
 from mock_api.config import ISSUE_TYPES, STATUS_IDS
 from mock_api.index import GroundTruthIndex
 from mock_api.serializers import (
@@ -69,6 +70,7 @@ UNAUTHENTICATED = "You are not authenticated. Authentication required to perform
 ISSUE_NOT_FOUND = "Issue does not exist or you do not have permission to see it."
 SPRINT_NOT_FOUND = "Sprint does not exist or you do not have permission to see it."
 BOARD_NOT_FOUND = "Board does not exist or you do not have permission to see it."
+TEAM_NOT_FOUND = "Team does not exist: {key}."
 
 OPEN_PATHS = frozenset({"/docs", "/docs/oauth2-redirect", "/redoc", "/openapi.json"})
 """Paths served without an Authorization header: FastAPI's own docs."""
@@ -119,6 +121,15 @@ class Catalog:
         self.teams: list[Team] = list(collector.teams)
         self.teams_by_board_id = {ids.board_id(t.team_id): t for t in self.teams}
         self.project_key = {t.team_id: t.key for t in self.teams}
+        self.teams_by_id = {t.team_id: t for t in self.teams}
+        self.teams_by_key = {t.key: t for t in self.teams}
+
+        # Capacity rows, by team (in team order) then sprint start date.
+        team_order = {t.team_id: n for n, t in enumerate(self.teams)}
+        self.capacities = sorted(
+            collector.capacities,
+            key=lambda c: (team_order[c.team_id], index.sprints[c.sprint_id].start_date),
+        )
 
         sprints_by_team: dict[str, list[Sprint]] = {t.team_id: [] for t in self.teams}
         for sprint in collector.sprints:
@@ -467,6 +478,34 @@ def create_app(raw_data_dir: Path | str | None = None) -> FastAPI:
             "total": len(issues),
             "issues": [issue_payload(issue, catalog, requested) for issue in page],
         }
+
+    # --- Capacity: our own design, not a Jira contract -------------------
+    # Capacity has no real API to imitate (docs/domain-model.md, "Ingestion
+    # split"), so this route and its row format (mock_api/capacity.py) are
+    # ours. Only the auth rule, the error body and the agile-style paging
+    # envelope are shared with the Jira-shaped routes above.
+
+    @app.get("/capacity")
+    def list_capacity(
+        team: str | None = None,
+        sprint: int | None = None,
+        startAt: int = Query(0, ge=0),
+        maxResults: int = Query(AGILE_DEFAULT_PAGE_SIZE, ge=1),
+        catalog: Catalog = Depends(get_catalog),
+    ) -> dict:
+        """List team capacity per sprint. Filters: team (project key), sprint (agile sprint id)."""
+        rows = catalog.capacities
+        if team is not None:
+            found = catalog.teams_by_key.get(team.upper())
+            if found is None:
+                raise JiraError(404, [TEAM_NOT_FOUND.format(key=team)])
+            rows = [c for c in rows if c.team_id == found.team_id]
+        if sprint is not None:
+            sprint_entity = catalog.sprint(sprint)
+            rows = [c for c in rows if c.sprint_id == sprint_entity.sprint_id]
+        return agile_page(
+            rows, startAt, maxResults, lambda c: serialize_capacity(c, catalog.teams_by_id[c.team_id])
+        )
 
     return app
 

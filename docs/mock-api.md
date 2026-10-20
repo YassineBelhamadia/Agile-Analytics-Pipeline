@@ -6,7 +6,7 @@ Code paths are relative to the repository root. "app.py" means [`mock_api/app.py
 
 ## 1. Overview
 
-The mock API is a FastAPI server that answers seven Jira Cloud REST endpoints from the simulator's ground truth. It exists so the ingestion layer can be built and tested against a realistic Jira contract without a Jira site.
+The mock API is a FastAPI server that answers seven Jira Cloud REST endpoints from the simulator's ground truth, plus one capacity endpoint of our own design ([section 11](#11-capacity-endpoint-our-own-design-not-an-atlassian-contract)). It exists so the ingestion layer can be built and tested against a realistic Jira contract without a Jira site.
 
 What it is **not**:
 
@@ -390,6 +390,11 @@ Two scripts make up the suite:
 | V41 | Every error response above has exactly `errorMessages` (list) and `errors` (object), not both empty. | `verify_app.is_jira_error` (from `check_errors`) |
 | V42 | A missing `raw_data/` directory stops startup with a `RuntimeError` that names `generate_raw_data.py`. | `verify_app.check_refuses_to_start` |
 | V43 | Every serialized `duedate` matches the deadline rule, re-derived independently from the memberships: null for issues never in a sprint, sprint's last workday for Story and Task, joined + 5 workdays capped there for Bug. For resolved Stories and Tasks, the date comparison agrees with the exact sprint-end comparison. | `verify.check_duedates` |
+| V44 | `/capacity` paged at sizes 1, 5, 7, 50 and 100 returns all 36 rows exactly once, each equal to the ground-truth capacity record (team key, sprint ID, headcount, `pto_days`), with only those four fields. | `verify_app.check_capacity` |
+| V45 | `team` (case-insensitive) returns that team's 12 rows; `sprint` returns that sprint's one row; a team plus another team's sprint returns an empty page. | `verify_app.check_capacity` |
+| V46 | The capacity row check rejects a changed `pto_days` and a missing row (sabotage, run on every pass). | `verify_app.check_capacity` |
+| V47 | `/capacity` returns 401 without auth, 404 for an unknown team or sprint, and 400 for a non-integer sprint, `maxResults=0` or a negative `startAt`, all in the `{errorMessages, errors}` shape. | `verify_app.check_capacity` |
+| V48 | Capacity pages use the `{startAt, maxResults, total, isLast, values}` envelope; non-last pages are full; walked rows equal `total`. | `verify_app.walk_capacity` (from `check_capacity`) |
 
 **Implemented but not covered by the suite.** These are stated from the code only:
 
@@ -443,6 +448,7 @@ Two scripts make up the suite:
 | Timestamps | UTC; sprint dates use `+00:00`, other fields `+0000` | The ground truth is timezone-naive. Each style follows the respective spec examples. |
 | `WWW-Authenticate` header on 401 | `Basic realm="jira-mock"` | Standard HTTP practice; not taken from Jira. |
 | Unauthenticated docs paths | `/docs`, `/redoc`, `/openapi.json` | Convenience for local use. |
+| The whole capacity endpoint | Path, parameters, row fields and ordering ([section 11](#11-capacity-endpoint-our-own-design-not-an-atlassian-contract)) | Jira has no capacity API. Per `docs/domain-model.md` ("Ingestion split"), there is no contract to imitate. |
 
 ## 9. Known gaps and simplifications
 
@@ -498,8 +504,36 @@ changelog : 18 issues x 3 page sizes match the single page
 issues    : all 530 issues equal serialize_issue, by key and by numeric id
 agile     : 3 boards, all 36 sprints reachable; sprint issues match all 320 memberships
 errors    : 26 error cases return the right status and Jira's errorMessages/errors shape
+capacity  : 36 rows at page sizes 1, 5, 7, 50, 100; team and sprint filters exact; sabotage caught; 6 error cases
 startup   : missing raw_data refuses startup: Cannot start the mock API: ground truth directory /nonexistent/raw_data does not...
 ALL APP CHECKS PASSED
 ```
 
 These counts (530 issues, 36 sprints, 320 memberships) hold for the shipped `SEED = 22` (`simulator/clock.py`). A different seed changes them.
+
+## 11. Capacity endpoint (our own design, not an Atlassian contract)
+
+Nothing in this section comes from Atlassian. Jira has no capacity API, and companies track headcount and PTO in their own tools and shapes ([`docs/domain-model.md`](domain-model.md), "Ingestion split"). So `GET /capacity` and its row format are our own design, served alongside the Jira-shaped endpoints but separate from them in code: the route is in its own section of app.py (`list_capacity`), and the row format is in [`mock_api/capacity.py`](../mock_api/capacity.py) (`serialize_capacity`). What it shares with the Jira-shaped endpoints: the auth rule and error body ([section 6](#6-authentication-and-errors)), and the agile-style offset paging ([section 4](#4-pagination)).
+
+| Parameter | Default | Behavior |
+|---|---|---|
+| `team` | none | Project key, case-insensitive. Unknown: 404 `Team does not exist: <key>.` [V45, V47] |
+| `sprint` | none | Agile sprint ID (the `id` from `/rest/agile/1.0/sprint/{sprintId}`). Unknown: 404 (the sprint message). Not an integer: 400. [V45, V47] |
+| `startAt` | `0` | must be ≥ 0, else 400 [V47] |
+| `maxResults` | `50` (`AGILE_DEFAULT_PAGE_SIZE`) | must be ≥ 1, else 400 [V47] |
+
+Real response, `GET /capacity?maxResults=2`:
+
+```json
+{"maxResults": 2, "startAt": 0, "total": 36, "isLast": false,
+ "values": [{"team_key": "PHX", "sprint_id": 33292371, "headcount": 5, "pto_days": 0.00901022825809017},
+            {"team_key": "PHX", "sprint_id": 89928328, "headcount": 5, "pto_days": 4.296392379035992}]}
+```
+
+- **Rows:** one per team per sprint, 36 in the shipped data. Each row is `team_key`, `sprint_id`, `headcount` and `pto_days`, equal to the ground-truth `Capacity` record. [V44, V48] The equality check is shown to reject a changed value or a missing row. [V46]
+- **Identifiers:** a team is identified by project key and a sprint by its agile ID, so capacity joins to the Jira-shaped data without a mapping table. Ground-truth IDs such as `T-ATLAS` are not exposed.
+- **Field names:** snake_case on purpose, so the two contracts can't be confused.
+- **`pto_days`:** passed through at full precision. Rounding would make the API disagree with the ground truth.
+- **Order:** by team (in team order), then sprint start date (`Catalog.__init__`).
+- **Filters:** `team` and `sprint` combine with AND. A team plus another team's sprint returns an empty page (200, `total: 0`), not an error. [V45]
+
