@@ -23,3 +23,14 @@ agile-analytics-pipeline = "agile_analytics_pipeline:main"
 [build-system]
 requires = ["uv_build>=0.12.15,<0.13.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+# Starlette asks for httpx2 with its TestClient; httpx is the dependency we chose. Known, harmless.
+filterwarnings = ["ignore:Using `httpx` with `starlette.testclient` is deprecated"]

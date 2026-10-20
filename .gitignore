@@ -219,3 +219,6 @@ __marimo__/
 
 # Generated simulator output — reproducible via scripts/generate_raw_data.py
 raw_data/
+
+# Raw API responses landed by the extraction client — reproducible via python -m ingestion.extract
+landing/

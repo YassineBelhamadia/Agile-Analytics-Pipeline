@@ -20,8 +20,9 @@ defensible in an interview, including the options we rejected.
 - `scripts/generate_raw_data.py`: runs the simulation and writes `raw_data/`
 - `raw_data/`: generated ground truth. Gitignored, regenerable.
 - `mock_api/`: FastAPI app serving Jira-shaped endpoints plus `/capacity` from `raw_data/`. Done.
-- `ingestion/`: extraction client, then parsing into staging. In progress.
-- `warehouse/`: `docker-compose.yml` for Postgres (written; live smoke check pending), then the dbt project.
+- `ingestion/`: `client.py` (HTTP, retries, paging) + `extract.py` (raw pages and `manifest.json`
+  in gitignored `landing/`). Done; parsing next. `tests/`: pytest, in-process app, no server.
+- `warehouse/`: `docker-compose.yml` for Postgres (smoke and persistence checks pass), then dbt.
 - `dashboard/`: Power BI. Later.
 - `docs/`: documentation, the source of truth for decisions.
 
@@ -82,6 +83,8 @@ defensible in an interview, including the options we rejected.
 3 teams, 12 users, 36 sprints, 36 capacity rows, 530 issues, 1,488 status transitions,
 320 sprint memberships, 320 issues with a duedate (210 null). Extraction, staging and warehouse
 counts must match these.
+- Landing: 3 boards, 36 sprints, 530 issues, 36 capacity rows, changelogs 1,488 status + 320
+  Sprint entries, 320 sprint-issue entries; 579 files at default page sizes, reruns byte-identical.
 - Calibration seeds 1-60, held-out seeds 61-100 (`simulator/calibration.py`). Results live
   in domain-model.md; do not copy them here.
 - If SEED or any personality parameter changes, regenerate and update these numbers here
@@ -95,7 +98,11 @@ counts must match these.
 - Calibration table: `python -m simulator.calibration`
 - Postgres up (postgres:18.6, localhost:5433, credentials from the root `.env`; copy `.env.example`):
   `docker compose --env-file .env -f warehouse/docker-compose.yml up -d --wait`
-- Postgres smoke check: `python scripts/check_warehouse.py`; down: same compose command with `down`
+- Postgres smoke check: `python scripts/check_warehouse.py` (`--persistence` also restarts the
+  container and checks a row survives); down: same compose command with `down`
+- Extract (mock API running): `AAP_API_BASE_URL=http://localhost:8000 AAP_API_TOKEN=<any>
+  python -m ingestion.extract` -> `landing/`
+- Tests: `python -m pytest`
 
 ## Working rules
 - Never commit or push. Prepare the change and report; I review and commit myself.
@@ -111,8 +118,7 @@ counts must match these.
 - Keep reports short: what changed, verification results, what was assumed, what was left out.
 
 ## Current phase: ETL build, target done by Monday 2026-10-19
-1. Session 1: capacity endpoint (done), Postgres in Docker (compose written, smoke check pending),
-   extraction client
+1. Session 1: capacity endpoint, Postgres in Docker, extraction client (done)
 2. Session 2: parsing and staging tables
 3. Session 3: dbt star schema
 4. Session 4: sprint metrics and the six business questions, reconciled with sprint_report.py
