@@ -12,6 +12,7 @@ Rules for this file:
 | Step | Session | Commit subject | Status |
 |---|---|---|---|
 | 2.1 | 2 | `feat(staging): add staging schema and loader for reference entities` | done |
+| 2.1b | 2 | `refactor(staging): truncate and reload instead of drop and recreate` | done |
 | 2.2 | 2 | `feat(staging): load issues, status transitions and sprint memberships` | planned |
 | 2.3 | 2 | `test(staging): reconcile staging with raw_data and add sabotage checks` | planned |
 | 3.1 | 3 | `chore(dbt): initialize project with staging sources` | provisional |
@@ -54,7 +55,7 @@ Branch: `feat/etl-session-2`.
   - Epics are kept as issues, with null story points.
 - **Lineage.** Every table gets `_source_file` (the manifest `file`) and `_loaded_at` (one timestamp per run).
 - **Keys.** Primary keys, no foreign keys. Relationships are checked later by dbt tests (decision in [`decisions.md`](decisions.md)).
-- **Refresh.** Each run is a full refresh inside one transaction. Tables are dropped, recreated and loaded, then committed. Postgres DDL is transactional, so a failed run rolls back and the previous tables stay as they were.
+- **Refresh.** Each run is a full refresh inside one transaction, and a failed run rolls back, leaving the previous rows as they were. From step 2.1b, tables are created once and checked against their definition, then truncated and refilled with `COPY`. `--rebuild` drops and recreates them, without CASCADE, for a schema change ([D-022](decisions.md#d-022-staging-reloads-by-truncate-and-copy-drop-and-recreate-only-on---rebuild)). Step 2.1 dropped and recreated on every run.
 - **Connection.** From the `POSTGRES_*` environment variables only (`POSTGRES_HOST`, `POSTGRES_PORT` = 5433, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`). The loader does not read `.env` itself, so export the variables first (`set -a; . ./.env; set +a`) or use `uv run --env-file .env`. This differs from `scripts/check_warehouse.py`, which falls back to `.env`.
 - **Driver.** psycopg 3, because it is the maintained PostgreSQL adapter for Python, its `COPY` support fits bulk loads, and `scripts/check_warehouse.py` already uses it. It is already a dependency (`psycopg[binary]>=3.3.6` in `pyproject.toml`, added with uv), so no `uv add` is needed.
 - **Command.** `uv run python -m ingestion.load_staging`, reading `landing/` by default. The loader also takes a target schema (default `staging`), so tests can load into their own schema.
@@ -95,6 +96,32 @@ Every table also carries `_source_file` and `_loaded_at`. Users have no team col
 feat(staging): add staging schema and loader for reference entities
 
 Loads teams, users, boards, sprints and capacity with typed columns, primary keys and lineage columns.
+```
+
+### Step 2.1b: truncate and reload
+
+Added after 2.1 was approved. Session 2 now has four commits: 2.1, 2.1b, 2.2 and 2.3.
+
+- **Scope.** Replace drop-and-recreate on every run with create-if-missing, a definition check, then `TRUNCATE` and `COPY`, in one transaction. Add `--rebuild` (drop and recreate, no CASCADE) for schema changes. Postgres tests fail with a clear message when the server is unreachable, instead of erroring with a raw traceback.
+- **Expected files.**
+  - `ingestion/load_staging.py`
+  - `tests/test_staging.py`
+  - `docs/etl/02-staging.md`
+  - `docs/decisions.md`: D-022.
+  - `docs/etl-plan.md`
+  - `CLAUDE.md`: command.
+- **Gate.**
+  - All 2.1 gates still pass: counts, identical rerun, failed run leaves the tables intact, mid-transaction rollback, rerun-comparison sabotage.
+  - A view on a staging table survives a reload. `--rebuild` is refused while it exists and changes nothing.
+  - A changed table definition stops the load with a message naming `--rebuild`. `--rebuild` restores it.
+  - Postgres unreachable: the tests fail, never skip, with a message naming the host and port and how to start Postgres.
+  - On the real `staging`, the tables created by 2.1 pass the definition check with unchanged content.
+- **Commit message:**
+
+```
+refactor(staging): truncate and reload instead of drop and recreate
+
+Keeps staging tables in place so dbt models that depend on them survive a reload. A rebuild flag handles schema changes.
 ```
 
 ### Step 2.2: issues, transitions, memberships

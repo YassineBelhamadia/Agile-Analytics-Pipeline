@@ -6,7 +6,8 @@ tests/test_extraction.py does it, so no server or prior extract is needed.
 Tests marked `postgres` load into the `staging_test` schema, which they
 create and drop. They never touch `staging`. Without the POSTGRES_*
 variables they skip with a reason; run them with
-`uv run --env-file .env python -m pytest -rs`.
+`uv run --env-file .env python -m pytest -rs`. With the variables set but
+Postgres unreachable, they fail with a message saying so, never skip.
 """
 
 from __future__ import annotations
@@ -14,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import socket
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -63,13 +65,26 @@ def landing_copy(landing: Path, tmp_path: Path) -> Path:
     return Path(shutil.copytree(landing, tmp_path / "landing"))
 
 
-@pytest.fixture
-def conn():
+def connect_or_fail() -> psycopg.Connection:
+    """Connect for a Postgres test: skip if POSTGRES_* is unset, fail clearly if the server is unreachable."""
     missing = [name for name in loader.REQUIRED_ENV if not os.environ.get(name, "").strip()]
     if missing:
         pytest.skip(f"{', '.join(missing)} not set; run with `uv run --env-file .env python -m pytest`")
+    try:
+        return loader.connect_from_environment()
+    except psycopg.OperationalError as exc:
+        where = f"{os.environ['POSTGRES_HOST']}:{os.environ['POSTGRES_PORT']}"
+        pytest.fail(
+            f"Postgres is unreachable at {where}. Start it with "
+            f"`docker compose --env-file .env -f warehouse/docker-compose.yml up -d --wait`. ({exc})",
+            pytrace=False,
+        )
+
+
+@pytest.fixture
+def conn():
     assert TEST_SCHEMA != loader.DEFAULT_SCHEMA
-    with loader.connect_from_environment() as connection:
+    with connect_or_fail() as connection:
         drop_test_schema(connection)
         yield connection
         drop_test_schema(connection)
@@ -94,8 +109,12 @@ def snapshot(connection: psycopg.Connection) -> dict[str, list[tuple]]:
     return {table.name: contents(connection, table) for table in loader.TABLES}
 
 
-def load(connection: psycopg.Connection, landing_dir: Path) -> dict[str, int]:
-    return loader.load_staging(connection, landing_dir, schema=TEST_SCHEMA)
+def load(connection: psycopg.Connection, landing_dir: Path, rebuild: bool = False) -> dict[str, int]:
+    return loader.load_staging(connection, landing_dir, schema=TEST_SCHEMA, rebuild=rebuild)
+
+
+def full_snapshot(connection: psycopg.Connection) -> dict[str, list[tuple]]:
+    return {table.name: contents(connection, table, with_loaded_at=True) for table in loader.TABLES}
 
 
 def edit_page(landing_dir: Path, file: str, change) -> None:
@@ -232,29 +251,88 @@ def test_sabotage_the_rerun_comparison_catches_a_changed_value(conn, landing: Pa
 @pytest.mark.postgres
 def test_failed_parse_leaves_the_previous_tables_intact(conn, landing: Path, landing_copy: Path) -> None:
     load(conn, landing)
-    before = {table.name: contents(conn, table, with_loaded_at=True) for table in loader.TABLES}
+    before = full_snapshot(conn)
     (landing_copy / "capacity" / "page-0000.json").write_text('{"values": [')  # truncated page
     with pytest.raises(ParseError, match="capacity/page-0000.json is not valid JSON"):
         load(conn, landing_copy)
-    assert {table.name: contents(conn, table, with_loaded_at=True) for table in loader.TABLES} == before
+    assert full_snapshot(conn) == before
 
 
 @pytest.mark.postgres
 def test_failure_mid_transaction_rolls_back_every_table(conn, landing: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A failure after teams, users, boards and sprints were already replaced must undo all of them."""
+    """A failure after every table was truncated and four were refilled must undo all of it."""
     load(conn, landing)
-    before = {table.name: contents(conn, table, with_loaded_at=True) for table in loader.TABLES}
-    real_replace = loader._replace_table
+    before = full_snapshot(conn)
+    real_copy = loader._copy_rows
 
     def fail_on_capacity(connection, schema, table, rows, loaded_at):
         if table.name == "capacity":
             raise psycopg.errors.DiskFull("simulated failure while loading capacity")
-        real_replace(connection, schema, table, rows[:1], loaded_at)  # earlier tables are replaced with 1 row
+        real_copy(connection, schema, table, rows[:1], loaded_at)  # earlier tables are refilled with 1 row
 
-    monkeypatch.setattr(loader, "_replace_table", fail_on_capacity)
+    monkeypatch.setattr(loader, "_copy_rows", fail_on_capacity)
     with pytest.raises(psycopg.errors.DiskFull):
         load(conn, landing)
-    assert {table.name: contents(conn, table, with_loaded_at=True) for table in loader.TABLES} == before
+    assert full_snapshot(conn) == before
+
+
+@pytest.mark.postgres
+def test_reload_keeps_views_that_depend_on_staging(conn, landing: Path) -> None:
+    """A view built on a staging table (as a dbt staging model is) survives a normal reload.
+
+    Sabotage: the drop-and-recreate strategy, which --rebuild still uses, is
+    refused while the view exists, and the refusal changes nothing.
+    """
+    load(conn, landing)
+    view = sql.Identifier(TEST_SCHEMA, "stg_teams")
+    conn.execute(sql.SQL("create view {} as select project_key from {}").format(view, sql.Identifier(TEST_SCHEMA, "teams")))
+    load(conn, landing)
+    assert conn.execute(sql.SQL("select count(*) from {}").format(view)).fetchone()[0] == 3
+
+    before = full_snapshot(conn)
+    with pytest.raises(psycopg.errors.DependentObjectsStillExist):
+        load(conn, landing, rebuild=True)
+    assert conn.execute(sql.SQL("select count(*) from {}").format(view)).fetchone()[0] == 3
+    assert full_snapshot(conn) == before
+
+
+SCHEMA_CHANGES = {
+    "type changed": "alter table {s}.capacity alter column headcount type bigint",
+    "column added": "alter table {s}.capacity add column extra text",
+    "column dropped": "alter table {s}.sprints drop column complete_at",
+    "nullability changed": "alter table {s}.users alter column display_name drop not null",
+    "primary key dropped": "alter table {s}.teams drop constraint teams_pkey",
+}
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize("change", SCHEMA_CHANGES.values(), ids=SCHEMA_CHANGES.keys())
+def test_changed_definition_stops_the_load_until_rebuild(conn, landing: Path, change: str) -> None:
+    load(conn, landing)
+    conn.execute(change.format(s=TEST_SCHEMA))
+    before = full_snapshot(conn) if "drop column" not in change else None
+    with pytest.raises(loader.StagingError, match="does not match its definition.*--rebuild"):
+        load(conn, landing)
+    if before is not None:
+        assert full_snapshot(conn) == before
+
+    assert loader.main([str(landing), "--schema", TEST_SCHEMA, "--rebuild"]) == 0
+    for table in loader.TABLES:
+        assert loader._existing(conn, TEST_SCHEMA, table) == (loader._declared(table), list(table.primary_key)), table.name
+    assert load(conn, landing) == EXPECTED
+
+
+def test_unreachable_postgres_fails_with_a_clear_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With POSTGRES_* set but no server listening, Postgres tests fail (not skip) and say why."""
+    with socket.socket() as probe:  # a port nothing listens on
+        probe.bind(("127.0.0.1", 0))
+        closed_port = probe.getsockname()[1]
+    for name in loader.REQUIRED_ENV:
+        monkeypatch.setenv(name, "unused")
+    monkeypatch.setenv("POSTGRES_HOST", "127.0.0.1")
+    monkeypatch.setenv("POSTGRES_PORT", str(closed_port))
+    with pytest.raises(pytest.fail.Exception, match=f"Postgres is unreachable at 127.0.0.1:{closed_port}. Start it with"):
+        connect_or_fail()
 
 
 def test_cli_names_the_missing_variable_and_writes_nothing(monkeypatch: pytest.MonkeyPatch, capsys) -> None:

@@ -273,3 +273,30 @@ The narrative record of the early project decisions, with the full argument for 
   - Going through SQLAlchemy or pandas would add a layer between the explicit DDL and the rows, and `to_sql` infers column types instead of using the declared ones.
 - **Consequences:** no new dependency (`psycopg[binary]>=3.3.6` was already in `pyproject.toml`). Column types live in one place, `load_staging.TABLES`.
 - **Source:** [`etl-plan.md`](etl-plan.md) Session 2 spec; `ingestion/load_staging.py`; [`etl/02-staging.md`](etl/02-staging.md).
+
+## D-022: Staging reloads by truncate and COPY; drop and recreate only on `--rebuild`
+
+- **Date:** 2026-10-23
+- **Decision:**
+  - Staging tables are created once, if missing.
+  - Every run checks each existing table against its declared definition (columns, types, nullability, primary key), then truncates every table and refills it with `COPY`, all in one transaction.
+  - `--rebuild` drops and recreates the tables for a real schema change, without CASCADE.
+  - This replaces the drop-and-recreate on every run used in step 2.1.
+- **Context:** dbt staging models are often views on these tables. `DROP TABLE` fails while a view depends on the table, and `DROP ... CASCADE` would silently delete the views.
+- **Options considered:**
+  1. **Drop and recreate every run** (step 2.1). Breaks as soon as a view depends on staging. Its only advantage, schema changes applied automatically, is kept by `--rebuild`.
+  2. **Drop ... CASCADE every run.** Reloads succeed, but they delete dependent dbt views without saying so, and dbt must rebuild them after every load.
+  3. **Load into new tables, then swap by rename.** Views follow the table they were created on, not its name, so they keep pointing at the old table. That is wrong or broken, the same problem as option 1.
+  4. **`DELETE` then `COPY`.** Also keeps views, but leaves dead rows that need vacuuming. `TRUNCATE` does the same job in one step and is transactional in Postgres.
+  5. **Incremental upsert.** Not a full refresh. A row removed upstream would stay in staging.
+  6. **Truncate and `COPY`, create if missing, `--rebuild` for schema changes** (chosen).
+- **Why:**
+  - Tables keep their identity, so dependent views survive a reload.
+  - `TRUNCATE` is transactional, so a failed run still rolls back to the previous rows.
+  - With tables persisting, a definition changed in code could otherwise meet an old table silently, for example a type widened in one place only. So the definition check stops the load and names `--rebuild`.
+  - A rebuild without CASCADE fails loudly while a view depends on a table, and deletes nothing.
+- **Consequences:**
+  - A schema change means: drop the dependent views (or let dbt rebuild them), run `--rebuild`, then rerun dbt.
+  - `TRUNCATE` takes an exclusive lock until commit, like the drop did, so readers wait.
+  - `TRUNCATE` is not MVCC-safe: a concurrent transaction holding an older snapshot (repeatable read) can see the tables empty. Not an issue for a single-user pipeline.
+- **Source:** `ingestion/load_staging.py` (`_ensure_table`, `load_staging`); [`etl/02-staging.md`](etl/02-staging.md); step 2.1b in [`etl-plan.md`](etl-plan.md).

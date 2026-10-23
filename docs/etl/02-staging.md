@@ -1,6 +1,6 @@
 # 02. Staging
 
-Status: in progress. Step 2.1 is done: teams, users, boards, sprints and capacity. Issues, status transitions and sprint memberships come in step 2.2. The reconciliation with `raw_data/` comes in step 2.3 ([`../etl-plan.md`](../etl-plan.md)).
+Status: in progress. Step 2.1 is done: teams, users, boards, sprints and capacity. Step 2.1b replaced drop-and-recreate with truncate and reload ([D-022](../decisions.md#d-022-staging-reloads-by-truncate-and-copy-drop-and-recreate-only-on---rebuild)). Issues, status transitions and sprint memberships come in step 2.2. The reconciliation with `raw_data/` comes in step 2.3 ([`../etl-plan.md`](../etl-plan.md)).
 
 ## Purpose
 
@@ -9,7 +9,7 @@ Loads the raw pages in `landing/` into typed tables in the Postgres `staging` sc
 The code is two modules:
 
 - `ingestion/parse.py`: pure functions from landed pages to rows, with no database access.
-- `ingestion/load_staging.py`: connection, DDL, one transaction per run, and `COPY`.
+- `ingestion/load_staging.py`: connection, table definitions and their check, one transaction per run, `TRUNCATE` and `COPY`.
 
 ## Inputs and outputs
 
@@ -20,7 +20,8 @@ The code is two modules:
 
 **Outputs**
 
-- One table per entity in the target schema (default `staging`, created if missing), fully replaced on every successful run.
+- One table per entity in the target schema (default `staging`, created if missing).
+- Every successful run replaces all rows. The tables themselves stay in place, so views on them survive.
 - A failed run changes nothing.
 
 ## Schema or contract
@@ -45,13 +46,17 @@ Every column is `not null` except the three sprint dates, which Jira leaves empt
 - **Precision.** `pto_days` is stored as `double precision` with full precision kept.
 - **No team on users.** The API exposes no user-to-team link, and inferring one would be business logic.
 
-**Refresh.** `load_staging` parses every page before touching the database. Then, in one transaction:
+**Refresh** ([D-022](../decisions.md#d-022-staging-reloads-by-truncate-and-copy-drop-and-recreate-only-on---rebuild)). `load_staging` parses every page before touching the database. Then, in one transaction:
 
-1. `create schema if not exists`;
-2. for each table in order (teams, users, boards, sprints, capacity): `drop table if exists`, `create table`, then `COPY`;
-3. commit.
+1. `create schema if not exists`.
+2. For each table: if it is missing, `create table`. If it exists, compare its columns (name, type, nullability, order) and primary key with `TABLES`. On any difference, stop with a message naming `--rebuild`.
+3. `truncate` every table in one statement.
+4. `COPY` each table's rows.
+5. Commit.
 
-Postgres DDL is transactional, so any failure rolls back every table to its previous contents. The connection is autocommit, so the transaction block is a real `BEGIN`/`COMMIT`, not a savepoint. The loader refuses a connection that is already inside a transaction.
+`TRUNCATE` is transactional in Postgres, so any failure rolls back to the previous rows. The connection is autocommit, so the transaction block is a real `BEGIN`/`COMMIT`, not a savepoint. The loader refuses a connection that is already inside a transaction.
+
+**`--rebuild`.** Step 2 becomes `drop table` then `create table` for every table, for a real schema change. It never uses CASCADE: if a view depends on a table, the drop fails, the whole run rolls back, and the view is kept. The order for a schema change is: drop the dependent views (or let dbt recreate them), run `--rebuild`, then run dbt.
 
 ## How to run
 
@@ -60,17 +65,18 @@ From the repo root, with Postgres up (`docker compose --env-file .env -f warehou
 ```bash
 uv run --env-file .env python -m ingestion.load_staging              # landing/ -> schema staging
 uv run --env-file .env python -m ingestion.load_staging DIR --schema NAME
+uv run --env-file .env python -m ingestion.load_staging --rebuild    # after changing a table definition
 ```
 
-Prints the rows loaded per table and exits 0. On a parse error, a missing variable or a database error, it prints `Staging load failed: ...` to stderr and exits 1, and nothing is written.
+Prints the rows loaded per table and exits 0. On a parse error, a missing variable, a changed table definition (without `--rebuild`) or a database error, it prints `Staging load failed: ...` to stderr and exits 1. Nothing is written.
 
 ## How it is verified
 
-`uv run --env-file .env python -m pytest tests/test_staging.py -rs`: 17 tests, 0 skipped.
+`uv run --env-file .env python -m pytest tests/test_staging.py -rs`: 24 tests, 0 skipped.
 
 - **Landing.** The tests build their own landing in-process from the real `raw_data/`, as `tests/test_extraction.py` does.
 - **Schema.** Tests marked `postgres` load into `staging_test`, which they drop before and after. They never touch `staging`.
-- **Skips.** Without the `POSTGRES_*` variables those tests skip with a reason, so a gate run must show zero skipped.
+- **Skips and failures.** Without the `POSTGRES_*` variables those tests skip with a reason, so a gate run must show zero skipped. With the variables set but Postgres unreachable, they fail (a fixture error, non-zero exit), never skip, with: `Postgres is unreachable at <host>:<port>. Start it with docker compose ...`.
 
 | Test | What it proves |
 |---|---|
@@ -86,10 +92,17 @@ Prints the rows loaded per table and exits 0. On a parse error, a missing variab
 | `test_rerun_gives_identical_contents` | A second load gives identical rows on every column but `_loaded_at`, which has one value per run and changes between runs. |
 | `test_sabotage_the_rerun_comparison_catches_a_changed_value` | **Sabotage:** changing one `pto_days` by 1e-9 makes that comparison fail. |
 | `test_failed_parse_leaves_the_previous_tables_intact` | A truncated page fails the load, and every table, `_loaded_at` included, is unchanged. |
-| `test_failure_mid_transaction_rolls_back_every_table` | A database error while loading capacity, after the other four tables were already replaced, rolls all of them back. |
+| `test_failure_mid_transaction_rolls_back_every_table` | A database error while loading capacity, after every table was truncated and the other four refilled, rolls all of them back. |
+| `test_reload_keeps_views_that_depend_on_staging` | A view on `teams` survives a normal reload and still returns 3 rows. **Sabotage:** `--rebuild` (drop and recreate) is refused while the view exists, and the refusal leaves the view and every row unchanged. |
+| `test_changed_definition_stops_the_load_until_rebuild` (5 cases) | A changed type, an added column, a dropped column, changed nullability or a dropped primary key stops a normal load with a message naming `--rebuild`, leaving the rows unchanged. `main --rebuild` then restores every declared definition. |
+| `test_unreachable_postgres_fails_with_a_clear_message` | With nothing listening on the configured port, the Postgres connection helper fails the test with the "unreachable" message rather than skipping. |
 | `test_cli_names_the_missing_variable_and_writes_nothing` | A missing variable is named, `--env-file .env` is suggested, and the exit code is 1. |
 
-The mid-transaction test was itself checked by sabotage. With `Connection.transaction` replaced by a no-op, it fails while the count and rerun tests still pass.
+Three sabotage runs, each a throwaway pytest plugin that breaks one mechanism, show the tests guard what they claim:
+
+- **`Connection.transaction` as a no-op:** only the mid-transaction test fails.
+- **Every load forced to drop and recreate** (the 2.1 strategy): the view test and all 5 definition-change cases fail.
+- **The definition check switched off:** all 5 definition-change cases fail.
 
 **Gate run for step 2.1** on the real `landing/`, into `staging`, through the CLI:
 
@@ -97,13 +110,22 @@ The mid-transaction test was itself checked by sabotage. With `Connection.transa
 - **Rerun:** the md5 of every table's contents without `_loaded_at` is identical across two runs, and the md5 with `_loaded_at` differs.
 - **Failed run:** a copy of `landing/` with a truncated capacity page exits 1, and every table's md5, `_loaded_at` included, is unchanged.
 
+**Gate run for step 2.1b**, same setup, against the tables step 2.1 created:
+
+- **Definition check:** passes on the existing tables, with content identical to the 2.1 load.
+- **Rerun:** content identical, `_loaded_at` changed.
+- **Failed run:** every table unchanged, `_loaded_at` included.
+- **`--rebuild`:** content identical.
+
 ## Known limits
 
 - **Not loaded yet:** issues, status transitions and sprint memberships (step 2.2). Until then, the status ID map and the `customfield_10016` mapping are not exercised.
 - **No row-level reconciliation with `raw_data/` yet** (step 2.3).
 - **The whole landing is held in memory** while parsing. That is fine at 578 pages, not for a real site.
 - **No incremental load.** Every run replaces every table.
-- **Lock during the load.** `drop table` takes an exclusive lock, so readers of `staging` wait until the load commits.
+- **Lock during the load.** `truncate` takes an exclusive lock, so readers of `staging` wait until the load commits.
+- **Not MVCC-safe for old snapshots.** A concurrent transaction that started before the load (repeatable read) can see the truncated tables as empty. Not an issue for a single-user pipeline ([D-022](../decisions.md#d-022-staging-reloads-by-truncate-and-copy-drop-and-recreate-only-on---rebuild)).
+- **`--rebuild` needs dependent views gone.** It refuses while a view depends on a table, by design.
 
 ## Options rejected and why
 
@@ -111,4 +133,4 @@ The mid-transaction test was itself checked by sabotage. With `Connection.transa
 - **Reading `.env` in the loader,** as `scripts/check_warehouse.py` does. The spec says environment variables only, so where credentials come from stays visible in the command.
 - **Lenient timestamp parsing** (e.g. `datetime.fromisoformat` on anything). It would accept a naive timestamp and silently assume a zone. Two strict formats keep any contract change loud.
 - **Loading with `INSERT` per row, or via pandas or SQLAlchemy** (both are dependencies). `COPY` through psycopg is one round trip per table and keeps the types explicit in the DDL ([D-021](../decisions.md#d-021-postgres-driver-psycopg-3)).
-- **Truncate and insert instead of drop and create.** A full drop and create also applies DDL changes on the next run. Both are transactional in Postgres.
+- **Drop and recreate on every run** (step 2.1), `DROP ... CASCADE`, swapping tables by rename, `DELETE` instead of `TRUNCATE`, and incremental upserts. See [D-022](../decisions.md#d-022-staging-reloads-by-truncate-and-copy-drop-and-recreate-only-on---rebuild) for each option and why it lost to truncate and reload.
