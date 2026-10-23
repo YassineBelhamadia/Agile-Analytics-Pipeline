@@ -1,11 +1,11 @@
 # 02. Staging
 
-Status: in progress. All eight tables load:
+Status: done (Session 2). All eight tables load, and they are reconciled with `raw_data/` row by row:
 
 - **Step 2.1:** teams, users, boards, sprints and capacity.
 - **Step 2.1b:** replaced drop-and-recreate with truncate and reload ([D-022](../decisions.md#d-022-staging-reloads-by-truncate-and-copy-drop-and-recreate-only-on---rebuild)).
 - **Step 2.2:** issues, status transitions and sprint memberships.
-- **Next, step 2.3:** the row-by-row reconciliation with `raw_data/` ([`../etl-plan.md`](../etl-plan.md)).
+- **Step 2.3:** the row-by-row reconciliation with `raw_data/` and the sabotage checks ([`../etl-plan.md`](../etl-plan.md)).
 
 ## Purpose
 
@@ -155,11 +155,65 @@ Three sabotage runs, each a throwaway pytest plugin that breaks one mechanism, s
 - **Status names:** none differ from the fixed map. The last data timestamp is 2024-07-05 15:35:28.261 UTC.
 - **Rerun, failed run, `--rebuild`:** identical content on a rerun. A truncated changelog page exits 1 and leaves all eight tables unchanged. `--rebuild` gives identical content.
 
+### Reconciliation with `raw_data/` (step 2.3)
+
+`tests/test_staging_reconciliation.py`, 8 tests.
+
+**Independence.** The expected side is built from `raw_data/*.json` with plain `json` and `datetime`. It imports nothing from `mock_api/` (no serializer, no ID hashing) and calls no `ingestion.parse` helper, and a test checks that. The staging side is read from Postgres after a normal load.
+
+**Join keys.** Staging holds Jira IDs and `raw_data/` holds internal ones, so the two sides meet on natural keys, each checked unique in `raw_data/`:
+
+- team: project key;
+- user: display name;
+- issue: issue key;
+- sprint: team key + sprint name.
+
+Staging is read with left joins, so a dangling ID shows up as a mismatch. Rows are compared as multisets.
+
+| Table | Compared with `raw_data/` | Not compared, and why |
+|---|---|---|
+| `teams` | project key, name | `base_headcount`: no API counterpart |
+| `users` | display name | account ID (a hash of the raw ID); team: not exposed by the API |
+| `boards` | one per team, by project key | `raw_data/` has no boards |
+| `sprints` | team, name, state, start and end instant (the date at 09:00 UTC) | `complete_at`: no raw counterpart |
+| `capacity` | team, sprint, headcount, `pto_days` (exact float) | none |
+| `issues` | key, team, type, status, story points, due date, created, resolution date, parent, assignee, reporter | `summary`: synthetic in the mock, absent from `raw_data/` |
+| `status_transitions` | issue, timestamp, from and to status, author | transition ID (a hash) |
+| `sprint_memberships` | issue, sprint, `added_at` | changelog ID (a hash) |
+
+**Timestamp rule.** The precision is not identical, so the rule is stated in the test and here:
+
+- **The difference.** `raw_data/` timestamps are naive (UTC by convention, [`../mock-api.md`](../mock-api.md) section 8) with microseconds. The API truncates them to milliseconds.
+- **The rule.** Each raw value is read as UTC and **truncated (floored) to milliseconds**, then compared for exact equality. Nothing else is loosened. Dates (`duedate`, sprint dates) and `pto_days` are compared exactly as they are.
+- **Values affected:** 2,403 of the 2,651 raw timestamps:
+  - 529 of 530 `created`;
+  - 313 of 313 `resolutiondate`;
+  - 1,485 of 1,488 transition timestamps;
+  - 76 of 320 `added_at`. Memberships made at sprint planning are exactly 09:00:00.
+- **Truncation, not rounding.** `test_timestamp_rule_is_truncation_to_milliseconds` checks that staging holds only whole milliseconds, that truncation matches all 2,651 values, and that rounding instead would mismatch 1,236 of them.
+
+| Test | What it proves |
+|---|---|
+| `test_raw_natural_keys_are_unique` | The join keys identify one row each in `raw_data/`. |
+| `test_every_staging_table_equals_raw_data_row_by_row` | All 8 tables equal `raw_data/` on the fields above, and every count matches. |
+| `test_changelog_memberships_equal_the_sprint_issue_lists` | The 320 changelog-derived memberships and the 320 (sprint, issue) pairs on the landed sprint issue lists are the same set, checked in both directions. |
+| `test_timestamp_rule_is_truncation_to_milliseconds` | The rule above, with its counts. |
+| `test_sabotage_1_broken_timestamp_parsing_fails_the_reconciliation` (2 cases) | **Sabotage 1.** `+00:00` misread as +01:00 fails exactly `sprints`. `+0000` misread fails exactly `issues`, `status_transitions` and `sprint_memberships`. After `monkeypatch.undo()`, the reload reconciles cleanly. |
+| `test_sabotage_2_dropping_one_landed_page_fails_the_counts` | **Sabotage 2.** Removing `changelogs/PHX-29/page-0000.json` and its manifest entry from a copy: the load succeeds, but the counts fail (1,488 → 1,484 transitions, 320 → 319 memberships). Reloading the full landing passes again. |
+| `test_reconciliation_is_independent_of_the_api_and_the_parser` | No `mock_api` import. The expected side calls neither `parse.` nor `loader.`. |
+
+Two more throwaway sabotage runs each fail the row-by-row test with an `issues` mismatch: one swaps an issue's assignee and reporter, the other adds 1 to one issue's story points.
+
+**Gate run for step 2.3,** the same reconciliation run read-only against the real `staging` schema and `landing/`:
+
+- **Row by row:** all 8 tables equal `raw_data/`, and no count differs.
+- **Memberships:** 320 from changelogs and 320 from sprint lists, with 0 on one side only.
+- **Suite:** `uv run --env-file .env python -m pytest -rs` gives 54 passed, 0 skipped.
+
 ## Known limits
 
 - **Sprint removals are not modeled.** A Sprint item that takes an issue out of a sprint fails the load. The v1 data has none ([D-023](../decisions.md#d-023-staging-changelog-and-status-rules)).
 - **Status changes beyond the fixed map fail.** A renamed or added status on a real site would need the map updated.
-- **No row-level reconciliation with `raw_data/` yet** (step 2.3).
 - **The whole landing is held in memory** while parsing. That is fine at 578 pages, not for a real site.
 - **No incremental load.** Every run replaces every table.
 - **Lock during the load.** `truncate` takes an exclusive lock, so readers of `staging` wait until the load commits.

@@ -14,7 +14,7 @@ Rules for this file:
 | 2.1 | 2 | `feat(staging): add staging schema and loader for reference entities` | done |
 | 2.1b | 2 | `refactor(staging): truncate and reload instead of drop and recreate` | done |
 | 2.2 | 2 | `feat(staging): load issues, status transitions and sprint memberships` | done |
-| 2.3 | 2 | `test(staging): reconcile staging with raw_data and add sabotage checks` | planned |
+| 2.3 | 2 | `test(staging): reconcile staging with raw_data and add sabotage checks` | done |
 | 3.1 | 3 | `chore(dbt): initialize project with staging sources` | provisional |
 | 3.2 | 3 | `feat(dbt): add team, user, sprint and issue dimensions` | provisional |
 | 3.3 | 3 | `feat(dbt): add status transition fact and capacity model` | provisional |
@@ -164,6 +164,16 @@ Derives transitions and memberships from changelog items and parses both timesta
   - Sabotage 2: drop one landed page and the counts fail. In a copy of `landing/`, delete one changelog page and its manifest entry. Then the load succeeds and the counts are what fail.
   - Revert both sabotages afterwards. They run as monkeypatched tests, so nothing needs reverting in the code.
   - Tests that need Postgres use a separate test schema and never touch `staging`.
+- **Additions** (requested when 2.3 was approved to start; not in the original plan):
+  - **Every table with a raw counterpart.**
+    - Issues are compared field by field: key, type, status, story points, due date, resolution date, parent, assignee and reporter. Team and created were added too.
+    - Capacity, teams, users and sprints are compared as well. Boards are checked one per team, since `raw_data/` has none.
+    - The comparison is always against `raw_data/` directly, never through the API serializer or the parser's helpers.
+  - **An explicit timestamp rule.**
+    - Measure the precision of `raw_data/`. If values differ only below the millisecond, state the rule and how many values it affects, in the test and in `docs/etl/02-staging.md`. Never loosen the comparison silently.
+    - Result: `raw_data/` has microseconds, so 2,403 of 2,651 timestamps are affected. Raw values are truncated (floored) to milliseconds, and the test shows rounding would fail on 1,236 of them.
+  - **Sabotage 1 covers the parsing that affects the data,** for both offset styles: `+00:00` breaks only sprints; `+0000` breaks issues, transitions and memberships.
+  - **Last commit of the session.** The docs, the plan status and the CLAUDE.md updates go in it.
 - **Commit message:**
 
 ```

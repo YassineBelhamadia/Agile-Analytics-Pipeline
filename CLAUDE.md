@@ -24,7 +24,7 @@ defensible in an interview, including the options we rejected.
   `check_warehouse.py`; `test_hooks.sh`.
 - `mock_api/`: FastAPI app, Jira-shaped endpoints plus `/capacity`, from `raw_data/`. Done, capacity included.
 - `ingestion/`: `client.py` + `extract.py` land raw pages and `manifest.json` in gitignored `landing/`;
-  `parse.py` + `load_staging.py` fill all 8 `staging` tables (2.1, 2.1b, 2.2 done). `tests/`: pytest, no server.
+  `parse.py` + `load_staging.py` fill all 8 `staging` tables, reconciled with `raw_data/`. `tests/`: pytest, no server.
 - `warehouse/`: `docker-compose.yml` for Postgres (smoke and persistence checks pass), then dbt.
 - `.githooks/` + `.claude/settings.json`: hooks, permissions. `dashboard/`: Power BI, later. `docs/`: source of truth.
 
@@ -75,7 +75,7 @@ defensible in an interview, including the options we rejected.
 ## Shipped dataset (SEED=22): verification targets
 3 teams, 12 users, 36 sprints, 36 capacity rows, 530 issues, 1,488 status transitions,
 320 sprint memberships, 320 issues with a duedate (210 null). Extraction, staging and warehouse
-counts must match these.
+counts must match these. Staging also equals raw_data/ row by row (raw timestamps truncated to ms; docs/etl/02-staging.md).
 - Landing: 3 boards, 36 sprints, 530 issues, 36 capacity rows, changelogs 1,488 status + 320
   Sprint entries, 320 sprint-issue entries; 579 files at default page sizes, reruns byte-identical.
 - Calibration: seeds 1-60, held out 61-100 (`simulator/calibration.py`); results only in domain-model.md.
@@ -112,8 +112,8 @@ counts must match these.
 ## Current phase: ETL build, target date to be set (steps and gates: `docs/etl-plan.md`)
 0. Session 0: workflow scaffolding (plan, hooks, permissions, docs skeleton)
 1. Session 1: capacity endpoint, Postgres in Docker, extraction client (done)
-2. Session 2: parsing and staging tables (in progress: 2.1, 2.1b, 2.2 done; 2.3 next)
-3. Session 3: dbt star schema
+2. Session 2: parsing and staging tables (done, on `feat/etl-session-2`)
+3. Session 3: dbt star schema (next; outline in `docs/etl-plan.md`)
 4. Session 4: sprint metrics and the six business questions, reconciled with sprint_report.py
 5. Session 5: one-command pipeline, tests, CI, docs, clean run from an empty database
 

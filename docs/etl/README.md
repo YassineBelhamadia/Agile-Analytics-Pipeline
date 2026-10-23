@@ -5,7 +5,7 @@ One page per pipeline stage, in run order. Each page uses the template below. Th
 | # | Stage | Page | Status |
 |---|---|---|---|
 | 1 | Extraction: mock API → `landing/` | [01-extraction.md](01-extraction.md) | done |
-| 2 | Staging: `landing/` → Postgres `staging` schema | [02-staging.md](02-staging.md) | in progress (2.1, 2.1b, 2.2 done) |
+| 2 | Staging: `landing/` → Postgres `staging` schema | [02-staging.md](02-staging.md) | done (Session 2) |
 | 3 | dbt star schema | [03-dbt.md](03-dbt.md) | planned |
 | 4 | Sprint metrics and business questions | [04-metrics.md](04-metrics.md) | planned |
 | 5 | One-command pipeline, CI | [05-pipeline.md](05-pipeline.md) | planned |

@@ -325,3 +325,21 @@ The narrative record of the early project decisions, with the full argument for 
   - Carryover or sprint removal (a v1.1 candidate) needs a membership end column before these loads can succeed.
   - Adding a status means updating `parse.STATUS_NAMES`.
 - **Source:** `ingestion/parse.py` (`status_name`, `parse_issues`); [`etl/02-staging.md`](etl/02-staging.md).
+
+## D-024: Reconciliation truncates raw timestamps to milliseconds
+
+- **Date:** 2026-10-23
+- **Decision:** when staging is compared with `raw_data/`, each raw timestamp is read as UTC and truncated (floored) to milliseconds, then compared for exact equality. No other tolerance anywhere.
+- **Context:**
+  - `raw_data/` timestamps are naive with microseconds; the API emits milliseconds, truncated (`jira_datetime` in `mock_api/serializers.py`, which documents why: rounding could carry 23:59:59.9996 into the next day).
+  - 2,403 of 2,651 raw timestamps differ from staging only below the millisecond.
+- **Options considered:**
+  - exact microsecond equality (fails on 2,403 values, for a difference the contract defines);
+  - a ±1 ms tolerance (would also accept rounding and off-by-one bugs);
+  - rounding (fails on 1,236 values);
+  - truncation (chosen).
+- **Why:** it reproduces the contract's own rule exactly, so any other difference still fails. The test shows rounding would not pass.
+- **Consequences:**
+  - Staging timestamps are millisecond-precise.
+  - Session 4 metrics compare them with sprint boundaries. No boundary comparison is affected in the shipped data ([`etl-plan.md`](etl-plan.md), Session 4).
+- **Source:** `tests/test_staging_reconciliation.py`; [`etl/02-staging.md`](etl/02-staging.md), "Reconciliation with raw_data/".
