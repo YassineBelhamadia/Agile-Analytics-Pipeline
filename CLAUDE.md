@@ -23,11 +23,10 @@ defensible in an interview, including the options we rejected.
 - `scripts/`: `generate_raw_data.py` writes `raw_data/` (ground truth, gitignored, regenerable);
   `check_warehouse.py`; `test_hooks.sh`.
 - `mock_api/`: FastAPI app, Jira-shaped endpoints plus `/capacity`, from `raw_data/`. Done, capacity included.
-- `ingestion/`: `client.py` + `extract.py` land raw pages and `manifest.json` in gitignored
-  `landing/`. Extraction done; staging loader next (Session 2). `tests/`: pytest, in-process, no server.
+- `ingestion/`: `client.py` + `extract.py` land raw pages and `manifest.json` in gitignored `landing/`;
+  `parse.py` + `load_staging.py` fill the `staging` schema (2.1 done: reference tables). `tests/`: pytest, no server.
 - `warehouse/`: `docker-compose.yml` for Postgres (smoke and persistence checks pass), then dbt.
-- `.githooks/`: commit-msg and pre-commit hooks. `.claude/settings.json`: permission rules.
-- `dashboard/`: Power BI. Later. `docs/`: documentation, the source of truth for decisions.
+- `.githooks/` + `.claude/settings.json`: hooks, permissions. `dashboard/`: Power BI, later. `docs/`: source of truth.
 
 ## Stack (locked, do not redesign; reasons in `docs/stack.md`)
 - Python (simulation, extraction, parsing), uv, pytest, FastAPI + uvicorn (mock API).
@@ -91,7 +90,8 @@ counts must match these.
   also restarts the container and checks a row survives); down: compose command with `down`, never `-v`
 - Extract (mock API running): `AAP_API_BASE_URL=http://localhost:8000 AAP_API_TOKEN=<any>
   uv run python -m ingestion.extract` -> `landing/`
-- Tests: `uv run python -m pytest`; with Postgres tests (Session 2 on): `uv run --env-file .env python -m pytest`
+- Load staging (Postgres up): `uv run --env-file .env python -m ingestion.load_staging` -> schema `staging`
+- Tests: `uv run --env-file .env python -m pytest -rs` (Postgres tests skip without `POSTGRES_*`; gates need 0 skipped)
 - Hooks: `sh scripts/test_hooks.sh`; enable once per clone (Yassine only): `git config core.hooksPath .githooks`
 
 ## Working rules
@@ -112,7 +112,7 @@ counts must match these.
 ## Current phase: ETL build, target date to be set (steps and gates: `docs/etl-plan.md`)
 0. Session 0: workflow scaffolding (plan, hooks, permissions, docs skeleton)
 1. Session 1: capacity endpoint, Postgres in Docker, extraction client (done)
-2. Session 2: parsing and staging tables (next)
+2. Session 2: parsing and staging tables (in progress: 2.1 done)
 3. Session 3: dbt star schema
 4. Session 4: sprint metrics and the six business questions, reconciled with sprint_report.py
 5. Session 5: one-command pipeline, tests, CI, docs, clean run from an empty database

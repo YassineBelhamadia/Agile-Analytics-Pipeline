@@ -32,5 +32,6 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+markers = ["postgres: needs the Postgres warehouse (POSTGRES_* set, e.g. via uv run --env-file .env)"]
 # Starlette asks for httpx2 with its TestClient; httpx is the dependency we chose. Known, harmless.
 filterwarnings = ["ignore:Using `httpx` with `starlette.testclient` is deprecated"]

@@ -11,7 +11,7 @@ Rules for this file:
 
 | Step | Session | Commit subject | Status |
 |---|---|---|---|
-| 2.1 | 2 | `feat(staging): add staging schema and loader for reference entities` | planned |
+| 2.1 | 2 | `feat(staging): add staging schema and loader for reference entities` | done |
 | 2.2 | 2 | `feat(staging): load issues, status transitions and sprint memberships` | planned |
 | 2.3 | 2 | `test(staging): reconcile staging with raw_data and add sabotage checks` | planned |
 | 3.1 | 3 | `chore(dbt): initialize project with staging sources` | provisional |

@@ -257,3 +257,19 @@ The narrative record of the early project decisions, with the full argument for 
 - **Why:** a sprint-scoped ratio would drop 180 issues. The headline matches the answer key.
 - **Consequences:** fixed inputs for Session 4.
 - **Source:** [`etl-plan.md`](etl-plan.md) Session 4; [`domain-model.md`](domain-model.md), "Deadline (duedate) rule".
+
+## D-021: Postgres driver: psycopg 3
+
+- **Date:** 2026-10-23
+- **Decision:** the staging loader talks to Postgres through psycopg 3 directly. It loads each table with `COPY ... FROM STDIN` inside one transaction.
+- **Context:** step 2.1 needs a driver for typed bulk loads with transactional DDL.
+- **Options considered:**
+  - psycopg 3;
+  - psycopg2;
+  - SQLAlchemy, or pandas `to_sql` (both already dependencies).
+- **Why:**
+  - psycopg 3 is the maintained PostgreSQL adapter for Python, its `COPY` support fits bulk loads, and `scripts/check_warehouse.py` already uses it.
+  - psycopg2 is the older generation of the same project.
+  - Going through SQLAlchemy or pandas would add a layer between the explicit DDL and the rows, and `to_sql` infers column types instead of using the declared ones.
+- **Consequences:** no new dependency (`psycopg[binary]>=3.3.6` was already in `pyproject.toml`). Column types live in one place, `load_staging.TABLES`.
+- **Source:** [`etl-plan.md`](etl-plan.md) Session 2 spec; `ingestion/load_staging.py`; [`etl/02-staging.md`](etl/02-staging.md).
