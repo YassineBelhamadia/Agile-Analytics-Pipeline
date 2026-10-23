@@ -11,30 +11,28 @@ Audience: employers hiring junior data / analytics engineers. Every design choic
 defensible in an interview, including the options we rejected.
 
 ## Read these first
+- `docs/workflow.md`: sessions, branches, gates, commit format, hooks, permissions
+- `docs/etl-plan.md`: every planned commit with its gate and exact message
+- `docs/decisions.md`: decision log (`decision-log.md` is superseded, kept for history); `docs/etl/`: one page per stage
 - `docs/domain-model.md`: entities, relationships, sprint metric definitions, calibration, v1 limitations
 - `docs/mock-api.md`: endpoints, pagination, what is verified vs. assumed
 - `docs/stack.md`: tool choices, reasons, and what is deferred
 
 ## Repo layout
 - `simulator/`: SimPy simulator, per-team random streams, persistence. Done. Do not touch unless asked.
-- `scripts/generate_raw_data.py`: runs the simulation and writes `raw_data/`
-- `raw_data/`: generated ground truth. Gitignored, regenerable.
-- `mock_api/`: FastAPI app serving Jira-shaped endpoints plus `/capacity` from `raw_data/`. Done.
-- `ingestion/`: `client.py` (HTTP, retries, paging) + `extract.py` (raw pages and `manifest.json`
-  in gitignored `landing/`). Done; parsing next. `tests/`: pytest, in-process app, no server.
+- `scripts/`: `generate_raw_data.py` writes `raw_data/` (ground truth, gitignored, regenerable);
+  `check_warehouse.py`; `test_hooks.sh`.
+- `mock_api/`: FastAPI app, Jira-shaped endpoints plus `/capacity`, from `raw_data/`. Done, capacity included.
+- `ingestion/`: `client.py` + `extract.py` land raw pages and `manifest.json` in gitignored
+  `landing/`. Extraction done; staging loader next (Session 2). `tests/`: pytest, in-process, no server.
 - `warehouse/`: `docker-compose.yml` for Postgres (smoke and persistence checks pass), then dbt.
-- `dashboard/`: Power BI. Later.
-- `docs/`: documentation, the source of truth for decisions.
+- `.githooks/`: commit-msg and pre-commit hooks. `.claude/settings.json`: permission rules.
+- `dashboard/`: Power BI. Later. `docs/`: documentation, the source of truth for decisions.
 
-## Stack (locked, do not redesign)
-- Python for simulation, extraction and parsing. uv for dependencies, pytest for tests.
-- FastAPI + uvicorn for the mock API.
-- PostgreSQL in Docker as the warehouse.
-- dbt Core for transformations and data tests.
-- GitHub Actions for CI.
-- Power BI for the dashboard.
-- Deferred: orchestration (Airflow or similar), after the v1 ETL works end to end; the
-  dbt vs. plain SQL write-up, until the dbt project exists (see `docs/stack.md`).
+## Stack (locked, do not redesign; reasons in `docs/stack.md`)
+- Python (simulation, extraction, parsing), uv, pytest, FastAPI + uvicorn (mock API).
+- PostgreSQL in Docker (warehouse), dbt Core (transformations, data tests), GitHub Actions (CI), Power BI.
+- Deferred: orchestration (Airflow or similar), after the v1 ETL works end to end; the dbt vs. plain SQL write-up, until the dbt project exists.
 
 ## Architecture principles
 - **Ground truth vs. views.** The simulator holds one internal model. The mock API never stores
@@ -60,17 +58,13 @@ defensible in an interview, including the options we rejected.
 - Epics have null story points and never change status. Exclude them from cycle-time and
   time-in-status metrics.
 - No `priority` field in v1, on purpose (see domain-model.md).
-- `issues.json` carries `duedate`, set when an issue first joins a sprint: Story/Task = the
-  sprint's last workday, Bug = 5 workdays after joining, capped there (authored policy, not
-  tuned). Epics and never-scheduled issues stay null. Rule: domain-model.md, "Deadline (duedate) rule".
-- Breach (business question 3), issues with a duedate only: breached if
-  `resolutiondate.date() > duedate`, or unresolved with duedate before the as-of date (last
-  timestamp in the data). Report resolved-only and incl. past due; exclude not-yet-due and
-  null duedates. Split by committed vs. scope-added: hit rate and breach measure different things.
+- `duedate` is set when an issue first joins a sprint, by an authored policy that is never tuned;
+  Epics and never-scheduled issues stay null. Rule: domain-model.md, "Deadline (duedate) rule".
+- Breach (business question 3): issues with a duedate only, as defined in that same section.
+  Report resolved-only and incl. past due, and split by committed vs. scope-added.
 - Every request needs an `Authorization` header (Basic or Bearer, any non-empty value).
-- `GET /capacity` (our own schema, not Jira): rows `team_key`, `sprint_id` (agile sprint id),
-  `headcount`, `pto_days` (full precision); snake_case; agile-style `startAt`/`maxResults`/
-  `isLast` paging; filters `team`, `sprint`. 36 rows. See docs/mock-api.md section 11.
+- `GET /capacity`: our own schema, not Jira's (snake_case, full-precision `pto_days`, agile-style
+  paging, `team`/`sprint` filters, 36 rows). Contract: docs/mock-api.md section 11.
 
 ## Sprint metric definitions (exact timestamps, never calendar days)
 - Committed: story points of issues with `added_at <= sprint start`
@@ -85,48 +79,46 @@ defensible in an interview, including the options we rejected.
 counts must match these.
 - Landing: 3 boards, 36 sprints, 530 issues, 36 capacity rows, changelogs 1,488 status + 320
   Sprint entries, 320 sprint-issue entries; 579 files at default page sizes, reruns byte-identical.
-- Calibration seeds 1-60, held-out seeds 61-100 (`simulator/calibration.py`). Results live
-  in domain-model.md; do not copy them here.
-- If SEED or any personality parameter changes, regenerate and update these numbers here
-  and in the docs in the same change.
+- Calibration: seeds 1-60, held out 61-100 (`simulator/calibration.py`); results only in domain-model.md.
+- If SEED or any personality parameter changes, regenerate and update these numbers here and in the docs in the same change.
 
-## Commands (venv active, from repo root)
-- Generate data: `python scripts/generate_raw_data.py`
-- Run mock API: `uvicorn mock_api.app:app --port 8000`
-- Verify serializers: `python -m mock_api.verify`
-- Verify API: `python -m mock_api.verify_app`
-- Calibration table: `python -m simulator.calibration`
+## Commands (from repo root; `--env-file .env` wherever credentials are needed)
+- Data / mock API: `uv run python scripts/generate_raw_data.py`; `uv run uvicorn mock_api.app:app --port 8000`
+- Verify: `uv run python -m mock_api.verify`, `uv run python -m mock_api.verify_app`, `uv run python -m simulator.calibration`
 - Postgres up (postgres:18.6, localhost:5433, credentials from the root `.env`; copy `.env.example`):
   `docker compose --env-file .env -f warehouse/docker-compose.yml up -d --wait`
-- Postgres smoke check: `python scripts/check_warehouse.py` (`--persistence` also restarts the
-  container and checks a row survives); down: same compose command with `down`
+- Postgres smoke check: `uv run --env-file .env python scripts/check_warehouse.py` (`--persistence`
+  also restarts the container and checks a row survives); down: compose command with `down`, never `-v`
 - Extract (mock API running): `AAP_API_BASE_URL=http://localhost:8000 AAP_API_TOKEN=<any>
-  python -m ingestion.extract` -> `landing/`
-- Tests: `python -m pytest`
+  uv run python -m ingestion.extract` -> `landing/`
+- Tests: `uv run python -m pytest`; with Postgres tests (Session 2 on): `uv run --env-file .env python -m pytest`
+- Hooks: `sh scripts/test_hooks.sh`; enable once per clone (Yassine only): `git config core.hooksPath .githooks`
 
 ## Working rules
-- Never commit or push. Prepare the change and report; I review and commit myself.
-- Conventional Commits (feat, fix, refactor, docs, chore, test). One block per commit.
+- Commit only on a feature branch (`feat/etl-session-N`), one commit per `docs/etl-plan.md` step,
+  after its gate passes, with the plan's message verbatim. Hooks enforce the format and the docs
+  check (`docs/workflow.md`). Never push. Gate fails twice: stop, write a failure note, no commit.
+- Conventional Commits (feat, fix, refactor, docs, chore, test, ci); subject <= 72 chars. Never
+  mention Claude or add co-author/session trailers. Hook bypass variables are Yassine's; report any bypass used.
 - One task per prompt. Do not start the next block until I confirm.
 - Do not touch `simulator/` unless the task says so.
 - Do not redesign locked decisions. If you think one is wrong, stop and tell me why.
 - When checking external docs (Atlassian), report what is confirmed vs. assumed, with sources.
-- Verify against the real `raw_data/`, not toy data. Include at least one sabotage test that
-  proves a check can fail.
+- Verify against the real `raw_data/`, not toy data, with at least one sabotage test proving a check can fail.
 - If something can't be done as asked, say so instead of silently working around it.
 - No credentials in tracked files. `.env` is gitignored; `.env.example` holds placeholders.
 - Keep reports short: what changed, verification results, what was assumed, what was left out.
 
-## Current phase: ETL build, target done by Monday 2026-10-19
+## Current phase: ETL build, target date to be set (steps and gates: `docs/etl-plan.md`)
+0. Session 0: workflow scaffolding (plan, hooks, permissions, docs skeleton)
 1. Session 1: capacity endpoint, Postgres in Docker, extraction client (done)
-2. Session 2: parsing and staging tables
+2. Session 2: parsing and staging tables (next)
 3. Session 3: dbt star schema
 4. Session 4: sprint metrics and the six business questions, reconciled with sprint_report.py
 5. Session 5: one-command pipeline, tests, CI, docs, clean run from an empty database
 
-If behind schedule, cut in this order: GitHub Actions, date dimension, docs polish.
-Never cut the reconciliation against `sprint_report.py`.
+If behind schedule, cut in this order: GitHub Actions, date dimension, docs polish. Never cut the reconciliation against `sprint_report.py`.
 
 ## Maintaining this file
 Update it whenever a decision, rule, command, phase or verification target changes, in the
-same change that causes it. Keep it under about 130 lines; move detail into `docs/`.
+same change that causes it. Keep it at 125 lines or fewer; move detail into `docs/`.

@@ -1,6 +1,6 @@
 # Stack
 
-The tools for the pipeline are locked. This page records what each one does here, why it was chosen, and what was deliberately left for later. Changing a locked choice needs a written reason in `docs/decision-log.md` first.
+The tools for the pipeline are locked. This page records what each one does here, why it was chosen, and what was deliberately left for later. Changing a locked choice needs a written reason in `docs/decisions.md` first.
 
 ## Locked
 

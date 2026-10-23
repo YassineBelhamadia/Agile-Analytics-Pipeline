@@ -1,6 +1,6 @@
 # Domain Model — Agile Analytics Pipeline (AAP)
 
-This document is the source of truth for the simulator's internal data model and how it maps to Jira's actual API contract. Read this before writing or modifying `simulator/`, `mock_api/`, or `ingestion/` code. See `docs/decision-log.md` for the higher-level project decisions this builds on.
+This document is the source of truth for the simulator's internal data model and how it maps to Jira's actual API contract. Read this before writing or modifying `simulator/`, `mock_api/`, or `ingestion/` code. See `docs/decisions.md` for the higher-level project decisions this builds on (the original narrative is in `docs/decision-log.md`, kept for history).
 
 ## Core principle: ground truth vs. views
 
@@ -175,7 +175,7 @@ In the shipped dataset (SEED=22), 320 issues have a due date (155 Story, 76 Task
 
 This is the key architectural asymmetry in the pipeline:
 
-- **Jira-shaped data (Team, User, Sprint, Issue, StatusTransition)** must be faithful to a **real, external contract** — that fidelity is the actual engineering skill being demonstrated (see decision log 5.5). It goes through the mock API, shaped like real Jira REST responses.
+- **Jira-shaped data (Team, User, Sprint, Issue, StatusTransition)** must be faithful to a **real, external contract** — that fidelity is the actual engineering skill being demonstrated (see `docs/decision-log.md` 5.5, summarized in `docs/decisions.md` D-003). It goes through the mock API, shaped like real Jira REST responses.
 - **Capacity data has no real universal contract to be faithful to** — every company tracks headcount/PTO differently (HR tool, spreadsheet, a side table in some other system). There's nothing to reverse-engineer, so this is a free, deliberate design choice rather than a fidelity requirement.
 
 **Decided approach:** serve Capacity through its own small, custom REST endpoint (e.g. `GET /capacity?team=X&sprint=Y`), separate from the Jira-shaped mock API, with its own simple schema of our own design (not modeled on any real product). This keeps the ingestion layer architecturally symmetric — two clients, two APIs, same pattern — rather than mixing an API client with a flat-file reader.

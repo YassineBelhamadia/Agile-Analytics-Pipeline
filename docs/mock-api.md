@@ -19,7 +19,7 @@ Where it fits, per [`docs/domain-model.md`](domain-model.md) ("Core principle: g
 1. **Simulator** (`simulator/`) produces the ground truth.
 2. **Persistence** (`simulator/persistence.py`) writes it to `raw_data/` as seven JSON files.
 3. **Mock API** (`mock_api/`) loads `raw_data/` once at startup and projects it into Jira response shapes on each request. It stores no Jira-shaped copy and never modifies the loaded entities. [V19]
-4. **Ingestion** (`ingestion/`, not built yet) will call these endpoints as it would a real Jira.
+4. **Ingestion** (`ingestion/extract.py`) calls these endpoints as it would a real Jira: the board list, each board's sprints, one `search/jql` per project, each issue's changelog, each sprint's issue list, and `/capacity`. It lands the raw pages in `landing/` ([`docs/etl/01-extraction.md`](etl/01-extraction.md)). It does not call `GET issue` or `GET sprint`.
 
 ## 2. Data flow
 
@@ -461,7 +461,7 @@ Two scripts make up the suite:
 - **Expanded changelog cap:** limited to the 100 most recent histories (`EMBEDDED_CHANGELOG_LIMIT`). Use the changelog endpoint for full history.
 - **No rank:** sprint issues aren't in Jira's rank order (see section 8).
 - **No search `expand`:** the search endpoint ignores `expand`, `properties`, `fieldsByKeys`, `failFast` and `reconcileIssues`.
-- **No writes or other endpoints:** no create, update or transition endpoints, and no capacity endpoint (planned separately).
+- **No writes or other endpoints:** every route is a `GET`. There are no create, update or transition endpoints. The only endpoint beyond the seven Jira-shaped ones is `GET /capacity`, our own design ([section 11](#11-capacity-endpoint-our-own-design-not-an-atlassian-contract)).
 
 ## 10. How to run and verify
 

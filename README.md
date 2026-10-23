@@ -10,7 +10,7 @@
 (TBD)
 
 ## Key Decisions
-(TBD — see docs/decision-log.md)
+(TBD — see docs/decisions.md)
 
 ## How to Run
 (TBD)

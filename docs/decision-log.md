@@ -1,3 +1,5 @@
+> **Superseded by [`decisions.md`](decisions.md); kept for history.**
+
 # Project Context — Multi-Team Delivery Analytics Pipeline
 
 This document exists so that any future session (Claude Code, a Claude Project, or a human teammate) can pick up this project without re-deriving decisions that were already made and stress-tested. Read this before proposing alternative approaches to anything listed under "Decisions" — those were reached by deliberately arguing against the easier options first.

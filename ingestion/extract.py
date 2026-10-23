@@ -2,7 +2,12 @@
 
 Run from the repo root with the mock API serving:
 
-    python -m ingestion.extract [landing_dir]
+    AAP_API_BASE_URL=http://localhost:8000 AAP_API_TOKEN=<any> \
+        uv run python -m ingestion.extract [landing_dir]
+
+Inputs: the API at AAP_API_BASE_URL, with AAP_API_TOKEN as a Bearer token.
+Outputs: one file per response page under landing_dir (default landing/),
+plus manifest.json. Documented in docs/etl/01-extraction.md.
 
 Discovery goes through the API only, the way a client of a real Jira site
 would have to:
