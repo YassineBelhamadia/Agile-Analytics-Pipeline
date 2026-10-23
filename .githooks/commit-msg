@@ -1,0 +1,63 @@
+#!/bin/sh
+# commit-msg: enforce the commit format described in docs/workflow.md.
+#
+# Rejects a message that:
+#   - does not start with an allowed Conventional Commits type
+#     (feat, fix, refactor, docs, chore, test, ci), optional scope;
+#   - has a subject longer than 72 characters;
+#   - has a second line that is not blank (no blank line before the body);
+#   - contains "Claude", "Co-Authored-By", "Generated with" or
+#     "Claude-Session", in any letter case.
+#
+# Git's own merge messages ("Merge branch ...") skip the format checks
+# but not the forbidden-word check.
+#
+# Enable once per clone: git config core.hooksPath .githooks
+
+msg_file=$1
+
+# Drop what git strips after this hook runs: everything below the
+# scissors line (git commit -v), comment lines, and leading blank lines.
+msg=$(sed -e '/^# -* >8 -*$/,$d' -e '/^#/d' "$msg_file" | sed -e '/[^[:space:]]/,$!d')
+
+subject=$(printf '%s\n' "$msg" | sed -n 1p)
+second=$(printf '%s\n' "$msg" | sed -n 2p)
+lines=$(printf '%s\n' "$msg" | wc -l | tr -d ' ')
+
+errors=""
+add_error() {
+    errors="${errors}  - $1
+"
+}
+
+forbidden=$(printf '%s\n' "$msg" | grep -i -n -E 'claude|co-authored-by|generated with|claude-session')
+if [ -n "$forbidden" ]; then
+    add_error "mentions a forbidden word (Claude, Co-Authored-By, Generated with, Claude-Session):
+$(printf '%s\n' "$forbidden" | sed 's/^/      line /')"
+fi
+
+case $subject in
+    "Merge branch "* | "Merge remote-tracking branch "* | "Merge pull request "*)
+        is_merge=1 ;;
+    *)
+        is_merge=0 ;;
+esac
+
+if [ "$is_merge" -eq 0 ]; then
+    if ! printf '%s\n' "$subject" | grep -q -E '^(feat|fix|refactor|docs|chore|test|ci)(\([a-z0-9][a-z0-9._/-]*\))?!?: [^[:space:]]'; then
+        add_error "subject is not '<type>(<scope>): <summary>' with type feat, fix, refactor, docs, chore, test or ci:
+      $subject"
+    fi
+    if [ "${#subject}" -gt 72 ]; then
+        add_error "subject is ${#subject} characters; the limit is 72"
+    fi
+    if [ "$lines" -ge 2 ] && printf '%s' "$second" | grep -q '[^[:space:]]'; then
+        add_error "line 2 must be blank, to separate the subject from the body"
+    fi
+fi
+
+if [ -n "$errors" ]; then
+    printf 'commit-msg: rejected.\n%sFormat: docs/workflow.md, "Commit format".\n' "$errors" >&2
+    exit 1
+fi
+exit 0

@@ -1,0 +1,38 @@
+#!/bin/sh
+# pre-commit: branch and documentation guardrails, see docs/workflow.md.
+#
+# 1. Refuses a commit on main. Bypass: AAP_ALLOW_MAIN=1.
+# 2. Refuses a commit that stages files under ingestion/, warehouse/ or
+#    dbt/ without staging anything under docs/. Bypass: AAP_SKIP_DOCS_CHECK=1.
+#
+# Enable once per clone: git config core.hooksPath .githooks
+
+branch=$(git symbolic-ref --short -q HEAD)
+
+if [ "$branch" = "main" ]; then
+    if [ "${AAP_ALLOW_MAIN:-}" = "1" ]; then
+        echo "pre-commit: AAP_ALLOW_MAIN=1 set, allowing a commit on main." >&2
+    else
+        echo "pre-commit: rejected. Commits go on a feature branch, not main." >&2
+        echo "  Create one with: git switch -c feat/etl-session-N" >&2
+        echo "  Bypass (owner only): AAP_ALLOW_MAIN=1 git commit ..." >&2
+        exit 1
+    fi
+fi
+
+staged=$(git -c core.quotePath=false diff --cached --name-only)
+code=$(printf '%s\n' "$staged" | grep -E '^(ingestion|warehouse|dbt)/')
+docs=$(printf '%s\n' "$staged" | grep -E '^docs/')
+
+if [ -n "$code" ] && [ -z "$docs" ]; then
+    if [ "${AAP_SKIP_DOCS_CHECK:-}" = "1" ]; then
+        echo "pre-commit: AAP_SKIP_DOCS_CHECK=1 set, committing code without a docs change." >&2
+    else
+        echo "pre-commit: rejected. These staged files change code, but nothing under docs/ is staged:" >&2
+        printf '%s\n' "$code" | sed 's/^/  /' >&2
+        echo "  Stage the matching docs/ update (see docs/etl/) in the same commit." >&2
+        echo "  Bypass: AAP_SKIP_DOCS_CHECK=1 git commit ... (report it if used)" >&2
+        exit 1
+    fi
+fi
+exit 0
