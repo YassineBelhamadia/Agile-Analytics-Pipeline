@@ -300,3 +300,28 @@ The narrative record of the early project decisions, with the full argument for 
   - `TRUNCATE` takes an exclusive lock until commit, like the drop did, so readers wait.
   - `TRUNCATE` is not MVCC-safe: a concurrent transaction holding an older snapshot (repeatable read) can see the tables empty. Not an issue for a single-user pipeline.
 - **Source:** `ingestion/load_staging.py` (`_ensure_table`, `load_staging`); [`etl/02-staging.md`](etl/02-staging.md); step 2.1b in [`etl-plan.md`](etl-plan.md).
+
+## D-023: Staging changelog and status rules
+
+- **Date:** 2026-10-23
+- **Decision:** in staging,
+  - status names come from the fixed map only, and the payload's own name must agree with it;
+  - a Sprint changelog item adds one membership per sprint ID in `to` but not in `from`, and one that removes a sprint fails the load;
+  - a history with more than one status item fails the load;
+  - story points are stored as `numeric`.
+- **Context:**
+  - Step 2.2 derives transitions and memberships from changelog items.
+  - The v1 data always has one item per history, and an empty `from` on Sprint items. Its status names always match the map.
+  - None of these rules changes what is loaded today. They decide what happens when the contract changes.
+- **Options considered:**
+  - For names: take them from the payload (`toString`); use the map silently; use the map and check the payload.
+  - For removals: model them as membership end times; ignore them; fail.
+  - For story points: `integer` (all current values); `numeric`.
+- **Why:**
+  - The map is the rule (CLAUDE.md, data contract facts). Checking the payload against it means a renamed status shows up as an error rather than as two names for one ID.
+  - Removals have no place in the v1 membership schema (`added_at` only, [`domain-model.md`](domain-model.md)), and ignoring one would leave a wrong membership in staging.
+  - Jira story points are decimal on a real site, and `numeric` keeps sums exact for the sprint-report reconciliation.
+- **Consequences:**
+  - Carryover or sprint removal (a v1.1 candidate) needs a membership end column before these loads can succeed.
+  - Adding a status means updating `parse.STATUS_NAMES`.
+- **Source:** `ingestion/parse.py` (`status_name`, `parse_issues`); [`etl/02-staging.md`](etl/02-staging.md).

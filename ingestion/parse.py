@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 
 from ingestion.extract import MANIFEST
@@ -36,6 +36,22 @@ ENDPOINTS: tuple[tuple[str, re.Pattern[str]], ...] = (
 _TIMESTAMP = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3})([+-])(\d{2}):?(\d{2})")
 """Both Jira styles: `...000+0000` (platform API) and `...000+00:00` (agile API)."""
 
+_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+_CHANGELOG_KEY = re.compile(r"/rest/api/3/issue/([^/]+)/changelog")
+
+STATUS_NAMES: dict[str, str] = {
+    "10000": "To Do",
+    "10001": "In Progress",
+    "10002": "Code Review",
+    "10003": "QA",
+    "10004": "Done",
+}
+"""The fixed status ID map, the same for every team (CLAUDE.md, data contract facts)."""
+
+STATUS_FIELD = "status"
+SPRINT_FIELD_ID = "customfield_10020"
+STORY_POINTS_FIELD = "customfield_10016"
+
 
 class ParseError(ValueError):
     """The landing cannot be parsed as it is. Stops the load before any write."""
@@ -47,11 +63,13 @@ class LandedPage:
 
     Attributes:
         file: Path relative to the landing directory, as in the manifest.
+        path: Request path that produced it, as in the manifest.
         kind: Page kind from ENDPOINTS, e.g. `boards` or `changelog`.
         data: The page body, decoded.
     """
 
     file: str
+    path: str
     kind: str
     data: dict
 
@@ -90,7 +108,7 @@ def read_landing(landing_dir: Path | str) -> list[LandedPage]:
             raise ParseError(f"{entry['file']} is listed in the manifest but missing from {landing_dir}") from None
         except ValueError as exc:
             raise ParseError(f"{entry['file']} is not valid JSON: {exc}") from None
-        pages.append(LandedPage(entry["file"], kind, data))
+        pages.append(LandedPage(entry["file"], entry["path"], kind, data))
     return pages
 
 
@@ -113,6 +131,44 @@ def parse_timestamp(value: str | None) -> datetime | None:
     local, sign, hours, minutes = match.groups()
     offset = timedelta(hours=int(hours), minutes=int(minutes)) * (-1 if sign == "-" else 1)
     return datetime.strptime(local, "%Y-%m-%dT%H:%M:%S.%f").replace(tzinfo=timezone(offset)).astimezone(UTC)
+
+
+def parse_date(value: str | None) -> date | None:
+    """Parse a Jira date (`duedate`, e.g. `2024-02-16`), or None.
+
+    Raises:
+        ParseError: For anything but YYYY-MM-DD.
+    """
+    if value is None:
+        return None
+    if not _DATE.fullmatch(value):
+        raise ParseError(f"Date not in YYYY-MM-DD form: {value!r}")
+    return date.fromisoformat(value)
+
+
+def status_name(status_id: str, shown_as: str, where: str) -> str:
+    """Map a status ID to its name with the fixed map, checking the payload agrees.
+
+    Args:
+        status_id: e.g. `10001`.
+        shown_as: The name the payload gives (`status.name` or `toString`).
+        where: Location for the error message.
+
+    Raises:
+        ParseError: If the ID is not in STATUS_NAMES, or the payload names
+            it differently. The name is never taken from the payload.
+    """
+    name = STATUS_NAMES.get(status_id)
+    if name is None:
+        raise ParseError(f"Unknown status ID {status_id!r} ({shown_as!r}) in {where}; the fixed map has {sorted(STATUS_NAMES)}")
+    if shown_as != name:
+        raise ParseError(f"Status ID {status_id} is {name!r} in the fixed map but {shown_as!r} in {where}")
+    return name
+
+
+def _sprint_ids(value: str) -> set[int]:
+    """Sprint IDs in a Sprint changelog item's `from` / `to` (comma separated, `""` when none)."""
+    return {int(part) for part in value.split(",") if part.strip()}
 
 
 def _add(table: dict, key, row: dict, entity: str) -> None:
@@ -222,3 +278,111 @@ def parse_reference(pages: list[LandedPage]) -> dict[str, list[dict]]:
         "sprints": list(sprints.values()),
         "capacity": list(capacity.values()),
     }
+
+
+def parse_issues(pages: list[LandedPage]) -> dict[str, list[dict]]:
+    """Rows for issues, status transitions and sprint memberships.
+
+    - Issues come from the search pages. `customfield_10016` becomes
+      `story_points` (null for Epics, kept as null), and the status ID is
+      named through the fixed map.
+    - Status transitions come from changelog items with `field = "status"`,
+      one row per history.
+    - Sprint memberships come from changelog items with
+      `fieldId = "customfield_10020"`. Each sprint ID in `to` but not in
+      `from` is one membership, with `added_at` = the history's `created`.
+    - A changelog page's issue is the key in its request path, matched to
+      an issue from the search pages.
+    - Changelog items for any other field are ignored.
+
+    Raises:
+        ParseError: On an unknown status ID or a name that disagrees with the
+            fixed map, a changelog for an issue the search did not return, a
+            history with more than one status item, an issue removed from a
+            sprint (not modeled in v1), a malformed date or timestamp, or two
+            pages disagreeing about the same issue or membership.
+    """
+    issues: dict = {}
+    transitions: dict = {}
+    memberships: dict = {}
+
+    for page in pages:
+        if page.kind != "search":
+            continue
+        for issue in page.data["issues"]:
+            fields = issue["fields"]
+            where = f"{page.file} ({issue['key']})"
+            status = fields["status"]
+            parent = fields.get("parent")
+            assignee = fields.get("assignee")
+            reporter = fields.get("reporter")
+            _add(issues, int(issue["id"]), {
+                "issue_id": int(issue["id"]),
+                "issue_key": issue["key"],
+                "issue_type": fields["issuetype"]["name"],
+                "project_id": int(fields["project"]["id"]),
+                "status_id": int(status["id"]),
+                "status_name": status_name(status["id"], status["name"], where),
+                "assignee_account_id": assignee["accountId"] if assignee else None,
+                "reporter_account_id": reporter["accountId"] if reporter else None,
+                "parent_issue_id": int(parent["id"]) if parent else None,
+                "story_points": fields.get(STORY_POINTS_FIELD),
+                "created_at": parse_timestamp(fields["created"]),
+                "resolved_at": parse_timestamp(fields.get("resolutiondate")),
+                "duedate": parse_date(fields.get("duedate")),
+                "summary": fields["summary"],
+                "_source_file": page.file,
+            }, "Issue")
+    issue_ids = {row["issue_key"]: issue_id for issue_id, row in issues.items()}
+
+    for page in pages:
+        if page.kind != "changelog":
+            continue
+        key = _CHANGELOG_KEY.fullmatch(page.path).group(1)
+        if key not in issue_ids:
+            raise ParseError(f"{page.file} is the changelog of {key}, which no search page returned")
+        issue_id = issue_ids[key]
+        for history in page.data["values"]:
+            where = f"{page.file} (history {history['id']})"
+            created = parse_timestamp(history["created"])
+            author = history.get("author")
+            status_items = [item for item in history["items"] if item["field"] == STATUS_FIELD]
+            if len(status_items) > 1:
+                raise ParseError(f"{where} has {len(status_items)} status items; expected at most one")
+            for item in status_items:
+                _add(transitions, int(history["id"]), {
+                    "changelog_id": int(history["id"]),
+                    "issue_id": issue_id,
+                    "author_account_id": author["accountId"] if author else None,
+                    "transitioned_at": created,
+                    "from_status_id": int(item["from"]),
+                    "from_status_name": status_name(item["from"], item["fromString"], where),
+                    "to_status_id": int(item["to"]),
+                    "to_status_name": status_name(item["to"], item["toString"], where),
+                    "_source_file": page.file,
+                }, "Status transition")
+            for item in history["items"]:
+                if item.get("fieldId") != SPRINT_FIELD_ID:
+                    continue
+                before, after = _sprint_ids(item["from"] or ""), _sprint_ids(item["to"] or "")
+                if before - after:
+                    raise ParseError(f"{where} removes {key} from sprint(s) {sorted(before - after)}; v1 staging models additions only")
+                for sprint_id in sorted(after - before):
+                    _add(memberships, (issue_id, sprint_id), {
+                        "issue_id": issue_id,
+                        "sprint_id": sprint_id,
+                        "added_at": created,
+                        "changelog_id": int(history["id"]),
+                        "_source_file": page.file,
+                    }, "Sprint membership")
+
+    return {
+        "issues": list(issues.values()),
+        "status_transitions": list(transitions.values()),
+        "sprint_memberships": list(memberships.values()),
+    }
+
+
+def parse_all(pages: list[LandedPage]) -> dict[str, list[dict]]:
+    """Rows for every staging table: `parse_reference` plus `parse_issues`."""
+    return parse_reference(pages) | parse_issues(pages)

@@ -24,7 +24,7 @@ defensible in an interview, including the options we rejected.
   `check_warehouse.py`; `test_hooks.sh`.
 - `mock_api/`: FastAPI app, Jira-shaped endpoints plus `/capacity`, from `raw_data/`. Done, capacity included.
 - `ingestion/`: `client.py` + `extract.py` land raw pages and `manifest.json` in gitignored `landing/`;
-  `parse.py` + `load_staging.py` fill the `staging` schema (2.1 done: reference tables). `tests/`: pytest, no server.
+  `parse.py` + `load_staging.py` fill all 8 `staging` tables (2.1, 2.1b, 2.2 done). `tests/`: pytest, no server.
 - `warehouse/`: `docker-compose.yml` for Postgres (smoke and persistence checks pass), then dbt.
 - `.githooks/` + `.claude/settings.json`: hooks, permissions. `dashboard/`: Power BI, later. `docs/`: source of truth.
 
@@ -112,7 +112,7 @@ counts must match these.
 ## Current phase: ETL build, target date to be set (steps and gates: `docs/etl-plan.md`)
 0. Session 0: workflow scaffolding (plan, hooks, permissions, docs skeleton)
 1. Session 1: capacity endpoint, Postgres in Docker, extraction client (done)
-2. Session 2: parsing and staging tables (in progress: 2.1 done)
+2. Session 2: parsing and staging tables (in progress: 2.1, 2.1b, 2.2 done; 2.3 next)
 3. Session 3: dbt star schema
 4. Session 4: sprint metrics and the six business questions, reconciled with sprint_report.py
 5. Session 5: one-command pipeline, tests, CI, docs, clean run from an empty database

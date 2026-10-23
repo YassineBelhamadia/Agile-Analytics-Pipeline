@@ -1,6 +1,11 @@
 # 02. Staging
 
-Status: in progress. Step 2.1 is done: teams, users, boards, sprints and capacity. Step 2.1b replaced drop-and-recreate with truncate and reload ([D-022](../decisions.md#d-022-staging-reloads-by-truncate-and-copy-drop-and-recreate-only-on---rebuild)). Issues, status transitions and sprint memberships come in step 2.2. The reconciliation with `raw_data/` comes in step 2.3 ([`../etl-plan.md`](../etl-plan.md)).
+Status: in progress. All eight tables load:
+
+- **Step 2.1:** teams, users, boards, sprints and capacity.
+- **Step 2.1b:** replaced drop-and-recreate with truncate and reload ([D-022](../decisions.md#d-022-staging-reloads-by-truncate-and-copy-drop-and-recreate-only-on---rebuild)).
+- **Step 2.2:** issues, status transitions and sprint memberships.
+- **Next, step 2.3:** the row-by-row reconciliation with `raw_data/` ([`../etl-plan.md`](../etl-plan.md)).
 
 ## Purpose
 
@@ -35,14 +40,31 @@ Every table also has `_source_file text not null` (the manifest `file` the row c
 | `boards` | `board_id` | `board_id bigint`, `board_name text`, `board_type text`, `project_id bigint`, `project_key text` | board list pages |
 | `sprints` | `sprint_id` | `sprint_id bigint`, `board_id bigint` (`originBoardId`), `sprint_name text`, `state text`, `start_at`, `end_at`, `complete_at` (`timestamptz`, nullable) | board sprint pages |
 | `capacity` | `team_key`, `sprint_id` | `team_key text`, `sprint_id bigint`, `headcount integer`, `pto_days double precision` | `/capacity` pages (our own schema, not Jira's) |
+| `issues` | `issue_id`, unique `issue_key` | `issue_id bigint`, `issue_key text`, `issue_type text`, `project_id bigint`, `status_id bigint`, `status_name text`, `assignee_account_id text`, `reporter_account_id text`, `parent_issue_id bigint`, `story_points numeric` (`customfield_10016`), `created_at timestamptz`, `resolved_at timestamptz`, `duedate date`, `summary text` | search pages (`fields=*all`) |
+| `status_transitions` | `changelog_id` | `changelog_id bigint` (history `id`), `issue_id bigint`, `author_account_id text`, `transitioned_at timestamptz` (history `created`), `from_status_id bigint`, `from_status_name text`, `to_status_id bigint`, `to_status_name text` | changelog items with `field = "status"` |
+| `sprint_memberships` | `issue_id`, `sprint_id` | `issue_id bigint`, `sprint_id bigint`, `added_at timestamptz` (history `created`), `changelog_id bigint` | changelog items with `fieldId = "customfield_10020"` |
 
-Every column is `not null` except the three sprint dates, which Jira leaves empty on future sprints.
+Columns are `not null` unless Jira can leave them empty:
+
+- the three sprint dates (future sprints);
+- assignee and reporter;
+- parent;
+- story points (Epics);
+- resolution and due dates;
+- a changelog author (automation).
 
 **Parsing rules** (`ingestion/parse.py`):
 
 - **Timestamps.** Exactly two formats are accepted: `YYYY-MM-DDTHH:MM:SS.mmm+0000` (platform API) and `...+00:00` (agile API), with any offset. Both become aware UTC datetimes, stored as `timestamptz`. Anything else, including a timestamp with no offset, fails the load rather than being guessed (`parse_timestamp`).
 - **One row per entity.** An entity seen on several pages is stored once, and its `_source_file` is the first page in manifest order. A later page must agree with it, column for column, or the load fails naming both files (`_add`). This is how teams from boards and from issues are checked against each other.
-- **IDs.** Project IDs arrive as a string on issues (`"18405660"`) and as a number on boards. Both are stored as `bigint`.
+- **IDs.** Numeric Jira IDs (project, issue, status, history, sprint) arrive as strings on platform payloads and as numbers on agile ones. All are stored as `bigint`.
+- **Status names** come from the fixed map (`parse.STATUS_NAMES`: 10000 To Do, 10001 In Progress, 10002 Code Review, 10003 QA, 10004 Done), never from the payload. The payload's own name (`status.name`, `fromString`, `toString`) must agree, or the load fails. So does an ID not in the map (`status_name`, [D-023](../decisions.md#d-023-staging-changelog-and-status-rules)).
+- **Story points.** `customfield_10016` becomes `story_points numeric`. Epics keep it null and stay in `issues`.
+- **Due dates.** `duedate` must be `YYYY-MM-DD` and becomes a `date`.
+- **Transitions.** One row per changelog history with a `status` item, keyed by the history ID. A history with two status items fails the load.
+- **Memberships.** For each Sprint item, every sprint ID in `to` but not in `from` (comma-separated lists) is one membership, with `added_at` = the history's `created`. An item that removes a sprint fails the load: v1 staging models additions only, and the data has none.
+- **Changelog issue.** A changelog page belongs to the issue whose key is in its manifest request path. That key must be one the search pages returned.
+- **Other changelog fields** (none in the mock) are ignored.
 - **Precision.** `pto_days` is stored as `double precision` with full precision kept.
 - **No team on users.** The API exposes no user-to-team link, and inferring one would be business logic.
 
@@ -72,7 +94,7 @@ Prints the rows loaded per table and exits 0. On a parse error, a missing variab
 
 ## How it is verified
 
-`uv run --env-file .env python -m pytest tests/test_staging.py -rs`: 24 tests, 0 skipped.
+`uv run --env-file .env python -m pytest tests/test_staging.py -rs`: 33 tests, 0 skipped.
 
 - **Landing.** The tests build their own landing in-process from the real `raw_data/`, as `tests/test_extraction.py` does.
 - **Schema.** Tests marked `postgres` load into `staging_test`, which they drop before and after. They never touch `staging`.
@@ -83,7 +105,7 @@ Prints the rows loaded per table and exits 0. On a parse error, a missing variab
 | `test_both_timestamp_formats_parse_to_the_same_utc_instant` | `+0000` and `+00:00` give the same aware UTC instant. Other offsets are converted. |
 | `test_unknown_timestamp_formats_are_refused` (4 cases) | No offset, `Z`, a space separator, or a non-ISO date each fail. |
 | `test_unknown_request_path_is_refused` | A manifest path the extractor never requests fails. |
-| `test_parsed_counts_match_the_shipped_dataset` | 3 teams, 12 users, 3 boards, 36 sprints, 36 capacity rows. |
+| `test_parsed_counts_match_the_shipped_dataset` | 3 teams, 12 users, 3 boards, 36 sprints, 36 capacity rows, 530 issues, 1,488 status transitions, 320 sprint memberships. |
 | `test_parser_reads_the_manifest_not_the_directory` | An unlisted extra file is ignored. A listed file that is missing fails, naming it. |
 | `test_conflicting_pages_are_refused` | A board whose project name disagrees with the issues' project fails the parse. |
 | `test_loaded_counts_match_the_shipped_dataset` | The same counts, in Postgres. |
@@ -92,17 +114,26 @@ Prints the rows loaded per table and exits 0. On a parse error, a missing variab
 | `test_rerun_gives_identical_contents` | A second load gives identical rows on every column but `_loaded_at`, which has one value per run and changes between runs. |
 | `test_sabotage_the_rerun_comparison_catches_a_changed_value` | **Sabotage:** changing one `pto_days` by 1e-9 makes that comparison fail. |
 | `test_failed_parse_leaves_the_previous_tables_intact` | A truncated page fails the load, and every table, `_loaded_at` included, is unchanged. |
-| `test_failure_mid_transaction_rolls_back_every_table` | A database error while loading capacity, after every table was truncated and the other four refilled, rolls all of them back. |
+| `test_failure_mid_transaction_rolls_back_every_table` | A database error while loading the last table, after every table was truncated and the other seven refilled, rolls all of them back. |
 | `test_reload_keeps_views_that_depend_on_staging` | A view on `teams` survives a normal reload and still returns 3 rows. **Sabotage:** `--rebuild` (drop and recreate) is refused while the view exists, and the refusal leaves the view and every row unchanged. |
-| `test_changed_definition_stops_the_load_until_rebuild` (5 cases) | A changed type, an added column, a dropped column, changed nullability or a dropped primary key stops a normal load with a message naming `--rebuild`, leaving the rows unchanged. `main --rebuild` then restores every declared definition. |
+| `test_changed_definition_stops_the_load_until_rebuild` (6 cases) | A changed type, an added column, a dropped column, changed nullability, a dropped primary key or a dropped unique constraint stops a normal load with a message naming `--rebuild`, leaving the rows unchanged. `main --rebuild` then restores every declared definition. |
 | `test_unreachable_postgres_fails_with_a_clear_message` | With nothing listening on the configured port, the Postgres connection helper fails the test with the "unreachable" message rather than skipping. |
 | `test_cli_names_the_missing_variable_and_writes_nothing` | A missing variable is named, `--env-file .env` is suggested, and the exit code is 1. |
+| `test_issue_counts_epics_and_due_dates` | 530 issues, 30 of them Epics. Every Epic has null story points and every other issue has some. 320 have a due date. 1,488 transitions, 320 memberships. |
+| `test_every_timestamp_is_aware_utc_in_both_formats` | All 2,759 non-null timestamps, `+0000` issue and changelog fields and `+00:00` sprint dates, are aware UTC. |
+| `test_transitions_replay_to_each_issue_status` | An independent check of the map: for every issue, transitions in time order chain from To Do and end at the issue's own status. |
+| `test_sabotage_a_wrong_status_map_is_refused` | **Sabotage:** with Code Review and QA swapped in the fixed map, parsing fails against the payload's names. |
+| `test_unknown_status_id_is_refused` | A changelog item with status `10099` fails the load. |
+| `test_sprint_items_add_each_new_sprint_and_refuse_removals` | `"A"` → `"A, 999"` adds exactly one membership. An item that removes the sprint fails the load. |
+| `test_changelog_of_an_unknown_issue_is_refused` | A changelog whose request path names an issue the search never returned fails the load. |
+| `test_issue_values_round_trip` | PHX-29 reads back from Postgres with its landed type, status, points, both timestamps (milliseconds kept), due date and parent. Epics have no points, and 320 issues have a due date. |
 
 Three sabotage runs, each a throwaway pytest plugin that breaks one mechanism, show the tests guard what they claim:
 
 - **`Connection.transaction` as a no-op:** only the mid-transaction test fails.
 - **Every load forced to drop and recreate** (the 2.1 strategy): the view test and all 5 definition-change cases fail.
-- **The definition check switched off:** all 5 definition-change cases fail.
+- **The definition check switched off:** all 5 definition-change cases fail (step 2.1b; the unique case was added in 2.2).
+- **Sprint items made to yield no IDs** (step 2.2): every count test fails, and so do the timestamp, membership and definition-change tests, which load real data. 11 tests in all.
 
 **Gate run for step 2.1** on the real `landing/`, into `staging`, through the CLI:
 
@@ -117,9 +148,17 @@ Three sabotage runs, each a throwaway pytest plugin that breaks one mechanism, s
 - **Failed run:** every table unchanged, `_loaded_at` included.
 - **`--rebuild`:** content identical.
 
+**Gate run for step 2.2**, same setup, on the schema left by 2.1b:
+
+- **Existing tables:** the five pass the definition check with unchanged content. The three new tables are created.
+- **Counts:** 530 issues (30 Epics, 0 with story points), 320 with a due date, 1,488 transitions, 320 memberships.
+- **Status names:** none differ from the fixed map. The last data timestamp is 2024-07-05 15:35:28.261 UTC.
+- **Rerun, failed run, `--rebuild`:** identical content on a rerun. A truncated changelog page exits 1 and leaves all eight tables unchanged. `--rebuild` gives identical content.
+
 ## Known limits
 
-- **Not loaded yet:** issues, status transitions and sprint memberships (step 2.2). Until then, the status ID map and the `customfield_10016` mapping are not exercised.
+- **Sprint removals are not modeled.** A Sprint item that takes an issue out of a sprint fails the load. The v1 data has none ([D-023](../decisions.md#d-023-staging-changelog-and-status-rules)).
+- **Status changes beyond the fixed map fail.** A renamed or added status on a real site would need the map updated.
 - **No row-level reconciliation with `raw_data/` yet** (step 2.3).
 - **The whole landing is held in memory** while parsing. That is fine at 578 pages, not for a real site.
 - **No incremental load.** Every run replaces every table.

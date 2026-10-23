@@ -16,7 +16,7 @@ import json
 import os
 import shutil
 import socket
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import psycopg
@@ -27,13 +27,17 @@ from psycopg import sql
 from ingestion import load_staging as loader
 from ingestion.client import JiraClient
 from ingestion.extract import MANIFEST, run_extraction
-from ingestion.parse import ParseError, page_kind, parse_reference, parse_timestamp, read_landing
+from ingestion import parse
+from ingestion.parse import ParseError, page_kind, parse_all, parse_timestamp, read_landing
 from mock_api.app import create_app
 
 RAW_DATA = Path(__file__).resolve().parent.parent / "raw_data"
 TEST_SCHEMA = "staging_test"
 
-EXPECTED = {"teams": 3, "users": 12, "boards": 3, "sprints": 36, "capacity": 36}
+EXPECTED = {
+    "teams": 3, "users": 12, "boards": 3, "sprints": 36, "capacity": 36,
+    "issues": 530, "status_transitions": 1488, "sprint_memberships": 320,
+}
 """Shipped dataset (SEED=22) targets, from CLAUDE.md."""
 
 EXPECTED_TYPES = {
@@ -42,6 +46,8 @@ EXPECTED_TYPES = {
     "integer": "integer",
     "double precision": "double precision",
     "timestamptz": "timestamp with time zone",
+    "numeric": "numeric",
+    "date": "date",
 }
 """DDL type -> information_schema.columns.data_type."""
 
@@ -149,14 +155,14 @@ def test_unknown_request_path_is_refused() -> None:
 
 
 def test_parsed_counts_match_the_shipped_dataset(landing: Path) -> None:
-    rows = parse_reference(read_landing(landing))
+    rows = parse_all(read_landing(landing))
     assert {name: len(table) for name, table in rows.items()} == EXPECTED
 
 
 def test_parser_reads_the_manifest_not_the_directory(landing_copy: Path) -> None:
     """An extra file the manifest doesn't list is ignored; a listed file that is missing fails."""
     shutil.copy(landing_copy / "capacity" / "page-0000.json", landing_copy / "capacity" / "page-0099.json")
-    assert len(parse_reference(read_landing(landing_copy))["capacity"]) == 36
+    assert len(parse_all(read_landing(landing_copy))["capacity"]) == 36
     (landing_copy / "boards" / "page-0000.json").unlink()
     with pytest.raises(ParseError, match="boards/page-0000.json is listed in the manifest but missing"):
         read_landing(landing_copy)
@@ -166,7 +172,7 @@ def test_conflicting_pages_are_refused(landing_copy: Path) -> None:
     """Teams come from boards and from issues; if they disagree the parser stops."""
     edit_page(landing_copy, "boards/page-0000.json", lambda p: p["values"][0]["location"].update(projectName="Renamed"))
     with pytest.raises(ParseError, match="Team 18405660 differs"):
-        parse_reference(read_landing(landing_copy))
+        parse_all(read_landing(landing_copy))
 
 
 # --- Loader, Postgres ------------------------------------------------------------
@@ -260,17 +266,17 @@ def test_failed_parse_leaves_the_previous_tables_intact(conn, landing: Path, lan
 
 @pytest.mark.postgres
 def test_failure_mid_transaction_rolls_back_every_table(conn, landing: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A failure after every table was truncated and four were refilled must undo all of it."""
+    """A failure on the last table, after every table was truncated and the others refilled, must undo all of it."""
     load(conn, landing)
     before = full_snapshot(conn)
     real_copy = loader._copy_rows
 
-    def fail_on_capacity(connection, schema, table, rows, loaded_at):
-        if table.name == "capacity":
-            raise psycopg.errors.DiskFull("simulated failure while loading capacity")
+    def fail_on_last(connection, schema, table, rows, loaded_at):
+        if table.name == loader.TABLES[-1].name:
+            raise psycopg.errors.DiskFull(f"simulated failure while loading {table.name}")
         real_copy(connection, schema, table, rows[:1], loaded_at)  # earlier tables are refilled with 1 row
 
-    monkeypatch.setattr(loader, "_copy_rows", fail_on_capacity)
+    monkeypatch.setattr(loader, "_copy_rows", fail_on_last)
     with pytest.raises(psycopg.errors.DiskFull):
         load(conn, landing)
     assert full_snapshot(conn) == before
@@ -302,6 +308,7 @@ SCHEMA_CHANGES = {
     "column dropped": "alter table {s}.sprints drop column complete_at",
     "nullability changed": "alter table {s}.users alter column display_name drop not null",
     "primary key dropped": "alter table {s}.teams drop constraint teams_pkey",
+    "unique constraint dropped": "alter table {s}.issues drop constraint issues_issue_key_key",
 }
 
 
@@ -318,7 +325,7 @@ def test_changed_definition_stops_the_load_until_rebuild(conn, landing: Path, ch
 
     assert loader.main([str(landing), "--schema", TEST_SCHEMA, "--rebuild"]) == 0
     for table in loader.TABLES:
-        assert loader._existing(conn, TEST_SCHEMA, table) == (loader._declared(table), list(table.primary_key)), table.name
+        assert loader._existing(conn, TEST_SCHEMA, table) == loader._declared(table), table.name
     assert load(conn, landing) == EXPECTED
 
 
@@ -342,3 +349,115 @@ def test_cli_names_the_missing_variable_and_writes_nothing(monkeypatch: pytest.M
     assert loader.main(["--schema", TEST_SCHEMA]) == 1
     err = capsys.readouterr().err
     assert "Missing POSTGRES_PASSWORD." in err and "--env-file .env" in err
+
+
+# --- Step 2.2: issues, status transitions, sprint memberships -------------------
+
+
+def first_changelog_with(landing_dir: Path, field: str) -> tuple[str, int]:
+    """(manifest file, history index) of the first landed history whose item has `field`."""
+    for entry in json.loads((landing_dir / MANIFEST).read_text())["files"]:
+        if entry["file"].startswith("changelogs/"):
+            for index, history in enumerate(json.loads((landing_dir / entry["file"]).read_bytes())["values"]):
+                if history["items"][0]["field"] == field:
+                    return entry["file"], index
+    raise AssertionError(f"no {field} history landed")
+
+
+def test_issue_counts_epics_and_due_dates(landing: Path) -> None:
+    rows = parse_all(read_landing(landing))
+    issues = rows["issues"]
+    epics = [issue for issue in issues if issue["issue_type"] == "Epic"]
+    assert len(issues) == 530 and len(epics) == 30
+    assert all(epic["story_points"] is None for epic in epics)
+    assert all(issue["story_points"] is not None for issue in issues if issue["issue_type"] != "Epic")
+    assert sum(issue["duedate"] is not None for issue in issues) == 320
+    assert len(rows["status_transitions"]) == 1488 and len(rows["sprint_memberships"]) == 320
+
+
+def test_every_timestamp_is_aware_utc_in_both_formats(landing: Path) -> None:
+    """Platform fields (+0000) and agile sprint dates (+00:00) all come out as aware UTC datetimes."""
+    rows = parse_all(read_landing(landing))
+    columns = {
+        "issues": ("created_at", "resolved_at"),
+        "status_transitions": ("transitioned_at",),
+        "sprint_memberships": ("added_at",),
+        "sprints": ("start_at", "end_at", "complete_at"),
+    }
+    seen = 0
+    for table, names in columns.items():
+        for row in rows[table]:
+            for name in names:
+                if row[name] is not None:
+                    assert row[name].tzinfo is UTC, (table, name, row[name])
+                    seen += 1
+    assert seen == 530 + 313 + 1488 + 320 + 3 * 36  # created + resolved + transitions + memberships + sprint dates
+
+
+def test_transitions_replay_to_each_issue_status(landing: Path) -> None:
+    """Independent check of the status map: each issue's transitions chain from To Do to its current status."""
+    rows = parse_all(read_landing(landing))
+    by_issue: dict[int, list[dict]] = {}
+    for transition in rows["status_transitions"]:
+        by_issue.setdefault(transition["issue_id"], []).append(transition)
+    for issue in rows["issues"]:
+        status = "To Do"
+        for transition in sorted(by_issue.get(issue["issue_id"], []), key=lambda t: t["transitioned_at"]):
+            assert transition["from_status_name"] == status, issue["issue_key"]
+            assert parse.STATUS_NAMES[str(transition["to_status_id"])] == transition["to_status_name"]
+            status = transition["to_status_name"]
+        assert status == issue["status_name"] == parse.STATUS_NAMES[str(issue["status_id"])], issue["issue_key"]
+
+
+def test_sabotage_a_wrong_status_map_is_refused(landing: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Swapping two names in the fixed map must fail against the payload's own status names."""
+    wrong = dict(parse.STATUS_NAMES, **{"10002": "QA", "10003": "Code Review"})
+    monkeypatch.setattr(parse, "STATUS_NAMES", wrong)
+    with pytest.raises(ParseError, match="in the fixed map but"):
+        parse_all(read_landing(landing))
+
+
+def test_unknown_status_id_is_refused(landing_copy: Path) -> None:
+    file, index = first_changelog_with(landing_copy, "status")
+    edit_page(landing_copy, file, lambda p: p["values"][index]["items"][0].update(to="10099"))
+    with pytest.raises(ParseError, match="Unknown status ID '10099'"):
+        parse_all(read_landing(landing_copy))
+
+
+def test_sprint_items_add_each_new_sprint_and_refuse_removals(landing_copy: Path) -> None:
+    file, index = first_changelog_with(landing_copy, "Sprint")
+    item = json.loads((landing_copy / file).read_bytes())["values"][index]["items"][0]
+    edit_page(landing_copy, file, lambda p: p["values"][index]["items"][0].update(to=f"{item['to']}, 999"))
+    added = [m for m in parse_all(read_landing(landing_copy))["sprint_memberships"] if m["sprint_id"] == 999]
+    assert len(added) == 1  # "A" -> "A, 999" adds one membership
+
+    edit_page(landing_copy, file, lambda p: p["values"][index]["items"][0].update({"from": item["to"], "to": ""}))
+    with pytest.raises(ParseError, match="removes .* from sprint"):
+        parse_all(read_landing(landing_copy))
+
+
+def test_changelog_of_an_unknown_issue_is_refused(landing_copy: Path) -> None:
+    manifest = json.loads((landing_copy / MANIFEST).read_text())
+    entry = next(e for e in manifest["files"] if e["file"].startswith("changelogs/"))
+    entry["path"] = "/rest/api/3/issue/ZZZ-1/changelog"
+    (landing_copy / MANIFEST).write_text(json.dumps(manifest))
+    with pytest.raises(ParseError, match="changelog of ZZZ-1, which no search page returned"):
+        parse_all(read_landing(landing_copy))
+
+
+@pytest.mark.postgres
+def test_issue_values_round_trip(conn, landing: Path) -> None:
+    """Values for one issue, read back from Postgres, equal its landed page (PHX-29, from docs/mock-api.md)."""
+    load(conn, landing)
+    row = conn.execute(
+        f"""select issue_type, status_id, status_name, story_points, created_at, resolved_at, duedate, parent_issue_id
+            from {TEST_SCHEMA}.issues where issue_key = 'PHX-29'"""
+    ).fetchone()
+    assert row == (
+        "Story", 10004, "Done", 3,
+        datetime(2024, 1, 25, 11, 10, 0, 767000, tzinfo=UTC), datetime(2024, 2, 12, 13, 11, 43, 221000, tzinfo=UTC),
+        date(2024, 2, 16), 29528245,
+    )
+    epics = conn.execute(f"select count(*), count(story_points) from {TEST_SCHEMA}.issues where issue_type = 'Epic'").fetchone()
+    assert epics == (30, 0)
+    assert conn.execute(f"select count(*) from {TEST_SCHEMA}.issues where duedate is not null").fetchone()[0] == 320

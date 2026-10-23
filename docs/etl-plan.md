@@ -13,7 +13,7 @@ Rules for this file:
 |---|---|---|---|
 | 2.1 | 2 | `feat(staging): add staging schema and loader for reference entities` | done |
 | 2.1b | 2 | `refactor(staging): truncate and reload instead of drop and recreate` | done |
-| 2.2 | 2 | `feat(staging): load issues, status transitions and sprint memberships` | planned |
+| 2.2 | 2 | `feat(staging): load issues, status transitions and sprint memberships` | done |
 | 2.3 | 2 | `test(staging): reconcile staging with raw_data and add sabotage checks` | planned |
 | 3.1 | 3 | `chore(dbt): initialize project with staging sources` | provisional |
 | 3.2 | 3 | `feat(dbt): add team, user, sprint and issue dimensions` | provisional |

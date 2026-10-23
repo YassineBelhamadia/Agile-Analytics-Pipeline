@@ -57,11 +57,13 @@ class Table:
         name: Table name within the target schema.
         columns: (column, Postgres type) pairs, in table order.
         primary_key: Primary key columns.
+        unique: Column sets with a unique constraint, besides the key.
     """
 
     name: str
     columns: tuple[tuple[str, str], ...]
     primary_key: tuple[str, ...]
+    unique: tuple[tuple[str, ...], ...] = ()
 
     @property
     def column_names(self) -> list[str]:
@@ -113,8 +115,46 @@ TABLES = (
         ("headcount", "integer not null"),
         ("pto_days", "double precision not null"),
     ), ("team_key", "sprint_id")),
+    Table("issues", (
+        ("issue_id", "bigint not null"),
+        ("issue_key", "text not null"),
+        ("issue_type", "text not null"),
+        ("project_id", "bigint not null"),
+        ("status_id", "bigint not null"),
+        ("status_name", "text not null"),
+        ("assignee_account_id", "text"),
+        ("reporter_account_id", "text"),
+        ("parent_issue_id", "bigint"),
+        ("story_points", "numeric"),
+        ("created_at", "timestamptz not null"),
+        ("resolved_at", "timestamptz"),
+        ("duedate", "date"),
+        ("summary", "text not null"),
+    ), ("issue_id",), unique=(("issue_key",),)),
+    Table("status_transitions", (
+        ("changelog_id", "bigint not null"),
+        ("issue_id", "bigint not null"),
+        ("author_account_id", "text"),
+        ("transitioned_at", "timestamptz not null"),
+        ("from_status_id", "bigint not null"),
+        ("from_status_name", "text not null"),
+        ("to_status_id", "bigint not null"),
+        ("to_status_name", "text not null"),
+    ), ("changelog_id",)),
+    Table("sprint_memberships", (
+        ("issue_id", "bigint not null"),
+        ("sprint_id", "bigint not null"),
+        ("added_at", "timestamptz not null"),
+        ("changelog_id", "bigint not null"),
+    ), ("issue_id", "sprint_id")),
 )
-"""Tables in load order. Sprint dates stay nullable: Jira's future sprints have none."""
+"""Tables in load order.
+
+Nullable columns are the ones Jira can leave empty: sprint dates (future
+sprints), assignee and reporter (unassigned, deleted users), parent, story
+points (Epics), resolution date, due date, and a changelog author
+(automation). Numeric Jira IDs, sent as strings, are stored as bigint.
+"""
 
 
 def connect_from_environment() -> psycopg.Connection:
@@ -143,34 +183,45 @@ def connect_from_environment() -> psycopg.Connection:
     )
 
 
-def _declared(table: Table) -> list[tuple[str, str, bool]]:
-    """(column, information_schema type, nullable) for every column, in table order."""
-    return [
+Definition = tuple[list[tuple[str, str, bool]], list[str], list[list[str]]]
+"""(columns as (name, information_schema type, nullable), primary key, unique column sets)."""
+
+
+def _declared(table: Table) -> Definition:
+    """The table's definition as declared in TABLES, in the shape `_existing` reads back."""
+    columns = [
         (name, INFORMATION_SCHEMA_TYPES[kind.removesuffix(" not null")], not kind.endswith(" not null"))
         for name, kind in table.columns + LINEAGE_COLUMNS
     ]
+    return columns, list(table.primary_key), sorted(list(columns) for columns in table.unique)
 
 
-def _existing(conn: psycopg.Connection, schema: str, table: Table) -> tuple[list[tuple[str, str, bool]], list[str]]:
-    """The live table's columns as in `_declared`, and its primary key columns. Empty if absent."""
+def _existing(conn: psycopg.Connection, schema: str, table: Table) -> Definition:
+    """The live table's definition, read from information_schema. Empty columns if absent."""
     columns = conn.execute(
         """select column_name, data_type, is_nullable = 'YES' from information_schema.columns
            where table_schema = %s and table_name = %s order by ordinal_position""",
         (schema, table.name),
     ).fetchall()
-    key = conn.execute(
-        """select k.column_name from information_schema.table_constraints c
+    constraints = conn.execute(
+        """select c.constraint_type, c.constraint_name, k.column_name from information_schema.table_constraints c
            join information_schema.key_column_usage k using (constraint_schema, constraint_name)
-           where c.table_schema = %s and c.table_name = %s and c.constraint_type = 'PRIMARY KEY'
-           order by k.ordinal_position""",
+           where c.table_schema = %s and c.table_name = %s and c.constraint_type in ('PRIMARY KEY', 'UNIQUE')
+           order by c.constraint_name, k.ordinal_position""",
         (schema, table.name),
     ).fetchall()
-    return [tuple(column) for column in columns], [column for (column,) in key]
+    key = [column for kind, _, column in constraints if kind == "PRIMARY KEY"]
+    unique: dict[str, list[str]] = {}
+    for kind, name, column in constraints:
+        if kind == "UNIQUE":
+            unique.setdefault(name, []).append(column)
+    return [tuple(column) for column in columns], key, sorted(unique.values())
 
 
 def _create_table(conn: psycopg.Connection, schema: str, table: Table) -> None:
     definitions = [sql.SQL("{} {}").format(sql.Identifier(name), sql.SQL(kind)) for name, kind in table.columns + LINEAGE_COLUMNS]
-    definitions.append(sql.SQL("primary key ({})").format(sql.SQL(", ").join(map(sql.Identifier, table.primary_key))))
+    for constraint, columns in [("primary key", table.primary_key)] + [("unique", columns) for columns in table.unique]:
+        definitions.append(sql.SQL(constraint + " ({})").format(sql.SQL(", ").join(map(sql.Identifier, columns))))
     conn.execute(sql.SQL("create table {} ({})").format(sql.Identifier(schema, table.name), sql.SQL(", ").join(definitions)))
 
 
@@ -187,14 +238,14 @@ def _ensure_table(conn: psycopg.Connection, schema: str, table: Table, rebuild: 
         conn.execute(sql.SQL("drop table if exists {}").format(sql.Identifier(schema, table.name)))
         _create_table(conn, schema, table)
         return
-    columns, key = _existing(conn, schema, table)
-    if not columns:
+    existing = _existing(conn, schema, table)
+    if not existing[0]:
         _create_table(conn, schema, table)
-    elif columns != _declared(table) or key != list(table.primary_key):
+    elif existing != _declared(table):
         raise StagingError(
             f"{schema}.{table.name} does not match its definition in ingestion/load_staging.py "
-            f"(columns {columns}, primary key {key}; expected {_declared(table)}, primary key "
-            f"{list(table.primary_key)}). Rerun with --rebuild to drop and recreate the staging tables."
+            f"(found {existing}; expected {_declared(table)}). "
+            "Rerun with --rebuild to drop and recreate the staging tables."
         )
 
 
@@ -230,7 +281,7 @@ def load_staging(
         psycopg.Error: If the database rejects the load. The transaction is
             rolled back, so the previous tables and rows are unchanged.
     """
-    rows = parse.parse_reference(parse.read_landing(landing_dir))
+    rows = parse.parse_all(parse.read_landing(landing_dir))
     if conn.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
         raise StagingError("The connection is already inside a transaction; the load needs its own.")
     loaded_at = datetime.now(UTC)
@@ -261,7 +312,7 @@ def main(argv: list[str]) -> int:
         return 1
     print(f"Loaded {args.landing_dir} into schema {args.schema}")
     for name, count in counts.items():
-        print(f"  {name:<10} {count:>5} rows")
+        print(f"  {name:<18} {count:>5} rows")
     return 0
 
 
