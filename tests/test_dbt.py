@@ -41,6 +41,7 @@ STG_VIEWS = {f"stg_{table}": count for table, count in EXPECTED.items()}
 """One stg_ view per staging table, with the shipped dataset's row counts."""
 
 DIMENSIONS = {"dim_team": 3, "dim_user": 12, "dim_sprint": 36, "dim_issue": 530}
+FACTS = {"fct_status_transitions": 1488, "fct_sprint_membership": 320, "fct_capacity": 36}
 
 
 def run_dbt(tmp_path: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
@@ -61,6 +62,19 @@ def failed_tests(tmp_path: Path) -> set[str]:
         for r in results
         if r["unique_id"].startswith("test.") and r["status"] in ("fail", "error")
     }
+
+
+def run_then_test(tmp_path: Path) -> set[str]:
+    """`dbt run`, then `dbt test`, and the names of the failed tests.
+
+    For sabotage checks. `dbt build` skips every node downstream of a failing
+    test, so one early failure would hide the tests that should also fail.
+    Running all models first and then all tests shows every failure.
+    """
+    result = run_dbt(tmp_path, "run")
+    assert result.returncode == 0, result.stdout
+    assert run_dbt(tmp_path, "test").returncode != 0, "the sabotage made no test fail"
+    return failed_tests(tmp_path)
 
 
 def drop_dbt_test_schemas(connection: psycopg.Connection) -> None:
@@ -133,8 +147,8 @@ def test_sabotage_a_wrong_credential_fails_dbt_debug_clearly(tmp_path: Path) -> 
 
 @pytest.mark.postgres
 def test_stg_views_build_count_and_survive_a_staging_reload(warehouse, landing: Path, tmp_path: Path) -> None:
-    """dbt builds one view per staging table in stg_test. A normal reload keeps the same views (same oids)."""
-    result = run_dbt(tmp_path, "build", "--select", "staging")
+    """dbt runs one view per staging table into stg_test. A normal reload keeps the same views (same oids)."""
+    result = run_dbt(tmp_path, "run", "--select", "staging")
     assert result.returncode == 0, result.stdout
 
     built = views(warehouse, STG)
@@ -191,7 +205,8 @@ def test_derived_user_teams_equal_raw_data(warehouse, tmp_path: Path) -> None:
 
 @pytest.mark.postgres
 def test_sabotage_a_deleted_staging_user_fails_the_user_relationships(warehouse, landing: Path, tmp_path: Path) -> None:
-    """Sabotage: delete one staging user. The issues pointing at them fail exactly the relationship tests to dim_user."""
+    """Sabotage: delete one staging user. Exactly the tests that point at dim_user fail: the issue's assignee and
+    reporter, the transition's author, and the transition join to every dimension."""
     user = "Phoenix Dev 1"
     reported = warehouse.execute(
         sql.SQL("select count(*) from {} i join {} u on u.account_id = i.reporter_account_id where u.display_name = %s").format(
@@ -201,11 +216,15 @@ def test_sabotage_a_deleted_staging_user_fails_the_user_relationships(warehouse,
     ).fetchone()[0]
     warehouse.execute(sql.SQL("delete from {} where display_name = %s").format(sql.Identifier(TEST_SCHEMA, "users")), (user,))
 
-    assert run_dbt(tmp_path, "build").returncode != 0
-    expected = {"relationships_dim_issue_assignee_user_id__user_id__ref_dim_user_"}
+    failed = run_then_test(tmp_path)
+    expected = {
+        "relationships_dim_issue_assignee_user_id__user_id__ref_dim_user_",
+        "relationships_fct_status_transitions_author_user_id__user_id__ref_dim_user_",
+        "assert_transitions_join_every_dimension_once",
+    }
     if reported:
         expected.add("relationships_dim_issue_reporter_user_id__user_id__ref_dim_user_")
-    assert failed_tests(tmp_path) == expected
+    assert failed == expected
 
     loader.load_staging(warehouse, landing, schema=TEST_SCHEMA)
     assert run_dbt(tmp_path, "build").returncode == 0
@@ -213,7 +232,8 @@ def test_sabotage_a_deleted_staging_user_fails_the_user_relationships(warehouse,
 
 @pytest.mark.postgres
 def test_sabotage_a_duplicated_staging_user_fails_unique(warehouse, tmp_path: Path) -> None:
-    """Sabotage: staging's primary key refuses a duplicate user; with the key dropped, unique on dim_user fails."""
+    """Sabotage: staging's primary key refuses a duplicate user. With the key dropped, unique on dim_user fails,
+    and the duplicate also doubles the transitions joined to that user."""
     users = sql.Identifier(TEST_SCHEMA, "users")
     duplicate = sql.SQL("insert into {} select * from {} limit 1").format(users, users)
     with pytest.raises(psycopg.errors.UniqueViolation):
@@ -221,13 +241,13 @@ def test_sabotage_a_duplicated_staging_user_fails_unique(warehouse, tmp_path: Pa
 
     warehouse.execute(sql.SQL("alter table {} drop constraint users_pkey").format(users))
     warehouse.execute(duplicate)
-    assert run_dbt(tmp_path, "build").returncode != 0
-    assert failed_tests(tmp_path) == {"unique_dim_user_user_id"}
+    assert run_then_test(tmp_path) == {"unique_dim_user_user_id", "assert_transitions_join_every_dimension_once"}
 
 
 @pytest.mark.postgres
 def test_sabotage_a_user_in_two_teams_fails_the_team_mapping(warehouse, tmp_path: Path) -> None:
-    """Sabotage: move one of a user's issues to another team. The user no longer maps to one team, and not_null fails."""
+    """Sabotage: move one of a user's issues to another team. The user no longer maps to one team, and not_null fails.
+    The moved issue's sprint membership now crosses teams, which the fact team check reports."""
     issues, teams = sql.Identifier(TEST_SCHEMA, "issues"), sql.Identifier(TEST_SCHEMA, "teams")
     warehouse.execute(
         sql.SQL(
@@ -235,5 +255,106 @@ def test_sabotage_a_user_in_two_teams_fails_the_team_mapping(warehouse, tmp_path
             "where issue_key = (select min(issue_key) from {} where issue_key like 'PHX-%%' and issue_type <> 'Epic')"
         ).format(issues, teams, issues)
     )
-    assert run_dbt(tmp_path, "build").returncode != 0
-    assert failed_tests(tmp_path) == {"not_null_dim_user_team_id"}
+    assert run_then_test(tmp_path) == {"not_null_dim_user_team_id", "assert_fact_teams_match_their_sprint"}
+
+
+# --- Facts -----------------------------------------------------------------------
+
+
+def staging(table: str) -> sql.Identifier:
+    return sql.Identifier(TEST_SCHEMA, table)
+
+
+def mart(table: str) -> sql.Identifier:
+    return sql.Identifier(MARTS, table)
+
+
+@pytest.mark.postgres
+def test_facts_build_with_the_shipped_counts_and_join_all_four_dimensions(warehouse, tmp_path: Path) -> None:
+    result = run_dbt(tmp_path, "build")
+    assert result.returncode == 0, result.stdout
+    assert counts(warehouse, MARTS, FACTS) == FACTS
+    joined = warehouse.execute(
+        sql.SQL(
+            "select count(*), count(distinct f.changelog_id) from {} f "
+            "join {} i on i.issue_id = f.issue_id join {} t on t.team_id = f.team_id "
+            "join {} u on u.user_id = f.author_user_id join {} s on s.sprint_id = f.event_sprint_id"
+        ).format(mart("fct_status_transitions"), mart("dim_issue"), mart("dim_team"), mart("dim_user"), mart("dim_sprint"))
+    ).fetchone()
+    assert joined == (1488, 1488)
+
+
+@pytest.mark.postgres
+def test_event_sprint_is_the_window_that_contains_the_transition(warehouse, tmp_path: Path) -> None:
+    """216 transitions happen after their issue's membership sprint ended; all of them land in a later sprint."""
+    assert run_dbt(tmp_path, "build").returncode == 0
+    rows = warehouse.execute(
+        sql.SQL(
+            "select count(*), count(*) filter (where f.transitioned_at >= ms.end_at and es.start_at >= ms.end_at) "
+            "from {} f join {} m using (issue_id) join {} ms on ms.sprint_id = m.sprint_id "
+            "join {} es on es.sprint_id = f.event_sprint_id where f.event_sprint_id <> m.sprint_id"
+        ).format(mart("fct_status_transitions"), mart("fct_sprint_membership"), mart("dim_sprint"), mart("dim_sprint"))
+    ).fetchone()
+    assert rows == (216, 216)
+
+
+@pytest.mark.postgres
+def test_a_transition_on_a_sprint_boundary_belongs_to_the_later_sprint(warehouse, tmp_path: Path) -> None:
+    """The window is half-open: a transition exactly at Sprint 6's start (= Sprint 5's end) is in Sprint 6 only."""
+    boundary_sprint = (
+        "(select sprint_id from {s} where sprint_name = 'Sprint 6' "
+        "and board_id = (select board_id from {b} where project_key = 'PHX'))"
+    )
+    moved = warehouse.execute(
+        sql.SQL(
+            "update {t} set transitioned_at = (select start_at from {s} where sprint_id = " + boundary_sprint + ") "
+            "where changelog_id = (select min(changelog_id) from {t} where issue_id in "
+            "(select issue_id from {i} where issue_key like 'PHX-%%')) returning changelog_id"
+        ).format(t=staging("status_transitions"), s=staging("sprints"), b=staging("boards"), i=staging("issues"))
+    ).fetchone()[0]
+
+    result = run_dbt(tmp_path, "build")
+    assert result.returncode == 0, result.stdout
+    event_sprint, expected = warehouse.execute(
+        sql.SQL("select event_sprint_id, " + boundary_sprint + " from {f} where changelog_id = %s").format(
+            f=mart("fct_status_transitions"), s=staging("sprints"), b=staging("boards")
+        ),
+        (moved,),
+    ).fetchone()
+    assert event_sprint == expected
+
+
+@pytest.mark.postgres
+def test_sabotage_an_orphan_transition_fails_the_issue_relationship(warehouse, tmp_path: Path) -> None:
+    """Sabotage: a transition whose issue ID doesn't exist. The relationship test fails, and so do the
+    checks that need the issue: its team, its window, and the join to every dimension."""
+    transitions = staging("status_transitions")
+    warehouse.execute(
+        sql.SQL(
+            "insert into {t} select changelog_id + 1000000000, 999999999, author_account_id, transitioned_at, "
+            "from_status_id, from_status_name, to_status_id, to_status_name, _source_file, _loaded_at "
+            "from {t} order by changelog_id limit 1"
+        ).format(t=transitions)
+    )
+    assert run_then_test(tmp_path) == {
+        "relationships_fct_status_transitions_issue_id__issue_id__ref_dim_issue_",
+        "not_null_fct_status_transitions_team_id",
+        "not_null_fct_status_transitions_event_sprint_id",
+        "assert_each_transition_in_exactly_one_sprint_window",
+        "assert_transitions_join_every_dimension_once",
+    }
+
+
+@pytest.mark.postgres
+def test_sabotage_overlapping_sprints_fail_the_window_test(warehouse, tmp_path: Path) -> None:
+    """Sabotage: PHX Sprint 5 ends a day late, overlapping Sprint 6. Transitions in that day match two windows."""
+    warehouse.execute(
+        sql.SQL(
+            "update {s} set end_at = end_at + interval '1 day' where sprint_name = 'Sprint 5' "
+            "and board_id = (select board_id from {b} where project_key = 'PHX')"
+        ).format(s=staging("sprints"), b=staging("boards"))
+    )
+    assert run_then_test(tmp_path) == {
+        "assert_each_transition_in_exactly_one_sprint_window",
+        "unique_fct_status_transitions_changelog_id",
+    }

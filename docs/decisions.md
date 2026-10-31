@@ -473,3 +473,44 @@ The narrative record of the early project decisions, with the full argument for 
   - A user with no assigned issues would get no team and fail the test. There is none today.
   - Reporters and changelog authors are not used for the derivation.
 - **Source:** `dbt/models/marts/dim_user.sql` (step 3.2); [`etl/03-dbt-star-schema.md`](etl/03-dbt-star-schema.md).
+
+## D-030: A transition's sprint is the window it happened in (`event_sprint_id`)
+
+- **Date:** 2026-10-31
+- **Decision:**
+  - `fct_status_transitions.event_sprint_id` is the sprint of the issue's team whose window contained the transition.
+  - The window is half-open: `start_at <= transitioned_at < end_at`. One sprint's end is the next one's start, so a boundary instant matches the later sprint only.
+  - A dbt test checks that every transition matches exactly one window.
+  - The issue's own sprint stays in `fct_sprint_membership`.
+- **Context:** the transition fact joins all four dimensions, so it needs a sprint key. In the shipped data the two candidates differ on 216 of 1,488 transitions. All 216 happen after the issue's membership sprint ended: unfinished work keeps moving, and v1 has no carryover ([`domain-model.md`](domain-model.md), "Known v1 limitations"). The breakdown is in [`etl/03-dbt-star-schema.md`](etl/03-dbt-star-schema.md).
+- **Options considered:**
+  - **A: by time window** (chosen, confirmed by Yassine at the 3.2 review).
+  - **B: by membership,** the sprint the issue belongs to. It would label work done in sprint N+1 as sprint N, and it duplicates rows as soon as an issue joins two sprints.
+  - **A closed window** (`<= end_at`). A transition exactly on a boundary would match two sprints.
+- **Why:**
+  - Every transition has exactly one window, and the join can't duplicate rows.
+  - It answers "what happened during this sprint", which time-in-status per sprint needs.
+  - Membership questions (committed, scope added, completed) still use `fct_sprint_membership` and the issue's `resolved_at`, as the answer key does.
+- **Consequences:**
+  - A transition outside every sprint (before the first sprint, after the last one, or in a gap between sprints) gets a null `event_sprint_id`. It fails `not_null` and the window test rather than being dropped. The shipped data has none.
+  - Overlapping sprints fail the window test and duplicate rows, which `unique` on `changelog_id` catches.
+  - The column name says what it is, so it is not mistaken for the issue's sprint.
+- **Source:** `dbt/models/marts/fct_status_transitions.sql`, `dbt/tests/assert_each_transition_in_exactly_one_sprint_window.sql`.
+
+## D-031: No dbt packages in v1
+
+- **Date:** 2026-10-31
+- **Decision:** the project uses dbt's built-in generic tests (`unique`, `not_null`, `relationships`, `accepted_values`), plus its own tests in `dbt/tests/`. It has no `packages.yml`.
+- **Context:** the composite grains (`fct_sprint_membership`, `fct_capacity`) need a uniqueness test on two columns. dbt has no built-in test for that.
+- **Options considered:**
+  - `dbt_utils.unique_combination_of_columns`, the usual choice. It needs `packages.yml`, a `dbt deps` step with network access in every clone and in CI, and a version pin to maintain.
+  - `unique` on a concatenated expression: works, but the generated test name and its failure output are hard to read.
+  - A 10-line generic test, `dbt/tests/generic/unique_combination.sql` (chosen).
+- **Why:** one small test doesn't justify a dependency and an extra install step. The SQL is short enough to read in an interview.
+- **Consequences:**
+  - If later sessions need several dbt_utils macros, adding the package is the better trade. `dbt/dbt_packages/` is already gitignored.
+  - Singular tests cover what the generic ones can't:
+    - every transition in exactly one window;
+    - the transition fact joining every dimension once;
+    - facts and their sprints sharing a team.
+- **Source:** `dbt/tests/`.

@@ -1,0 +1,118 @@
+version: 2
+
+models:
+  - name: fct_status_transitions
+    description: >
+      One row per status change, the star schema's central grain. Keys to all
+      four dimensions: issue, team, author (user) and event sprint.
+    columns:
+      - name: changelog_id
+        description: Jira changelog history ID. Primary key.
+        data_tests: [unique, not_null]
+      - name: issue_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_issue')
+                field: issue_id
+      - name: team_id
+        description: The issue's team.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_team')
+                field: team_id
+      - name: author_user_id
+        description: >
+          Who moved the issue. Jira allows null (automation); the shipped data
+          has none, and not_null guards the inner join to dim_user.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_user')
+                field: user_id
+      - name: event_sprint_id
+        description: >
+          The sprint of the issue's team whose window contained the transition
+          (start_at <= transitioned_at < end_at). Not the issue's membership
+          sprint, which is in fct_sprint_membership.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_sprint')
+                field: sprint_id
+      - name: transitioned_at
+        data_tests: [not_null]
+      - name: from_status_name
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [To Do, In Progress, Code Review, QA, Done]
+      - name: to_status_name
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [To Do, In Progress, Code Review, QA, Done]
+
+  - name: fct_sprint_membership
+    description: One row per issue joining a sprint, with when it joined.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [issue_id, sprint_id]
+    columns:
+      - name: issue_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_issue')
+                field: issue_id
+      - name: sprint_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_sprint')
+                field: sprint_id
+      - name: added_at
+        description: Time of the Sprint changelog item. Compared with dim_sprint.start_at for committed vs. scope added.
+        data_tests: [not_null]
+      - name: changelog_id
+        data_tests: [unique, not_null]
+
+  - name: fct_capacity
+    description: One row per team and sprint, from /capacity (our own schema, not Jira's).
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [team_id, sprint_id]
+    columns:
+      - name: team_id
+        description: Looked up from team_key in dim_team.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_team')
+                field: team_id
+      - name: team_key
+        data_tests: [not_null]
+      - name: sprint_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_sprint')
+                field: sprint_id
+      - name: headcount
+        data_tests: [not_null]
+      - name: pto_days
+        description: Full precision, as served by /capacity.
+        data_tests: [not_null]
