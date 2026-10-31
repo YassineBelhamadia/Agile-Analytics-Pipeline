@@ -360,3 +360,116 @@ The narrative record of the early project decisions, with the full argument for 
   - Running without `--env-file .env` and with no inline variables still fails, by design, now with a message that says how to fix it.
   - The error for a malformed URL does not echo its value, only its length.
 - **Source:** `ingestion/extract.py` (`client_from_environment`); `.env.example`; [`etl/01-extraction.md`](etl/01-extraction.md).
+
+## D-026: dbt Core 1.12 with dbt-postgres 1.11, in `dbt/`, profile from the environment
+
+- **Date:** 2026-10-31
+- **Decision:**
+  - The dbt project lives in `dbt/` at the repo root, next to `ingestion/` and `warehouse/`.
+  - Dependencies, added with uv: `dbt-core>=1.12.6,<1.13` and `dbt-postgres>=1.11.0,<1.12`. `uv.lock` pins them exactly.
+  - `dbt/profiles.yml` is committed. Every connection value is `env_var('POSTGRES_*')` with no default.
+  - Command: `uv run --env-file .env dbt <cmd> --project-dir dbt --profiles-dir dbt`.
+  - Anonymous usage stats are off (`flags: send_anonymous_usage_stats: false`).
+- **Context:** step 3.1 needs a dbt install that fits the locked stack ([D-005](#d-005-locked-stack)): dbt Core, Python 3.13, Postgres 18, uv. It also needs a profile that holds no secret.
+- **Options considered:**
+  - **Versions.**
+    - dbt-core 1.12.6, the latest stable on PyPI (released 2026-10-14), with Python 3.10 to 3.14 in its classifiers (chosen).
+    - 1.13, still beta in the dbt docs version list.
+    - An older 1.x: no reason, and it would miss fixes.
+    - "dbt v2". dbt now prints that v2 is the default for new installations. Confirmed in its install page (<https://docs.getdbt.com/docs/local/install-dbt>, read 2026-10-31): the default v2 comes under a separate license agreement, and an Apache 2.0 open-source v2 runtime is offered separately. v2 is not a dbt-core release on PyPI (dbt-core tops out at 1.12.6). Not checked: v2's Postgres support and feature parity. Rejected because the locked choice is dbt Core added with uv.
+  - **Adapter.** Since dbt 1.8, adapters are versioned separately from core. dbt-postgres 1.11.0 (2026-07-16) is the latest. It requires `dbt-core>=1.8.0rc1,<2.0`, `dbt-adapters>=1.24.1`, and supports Python 3.13.
+  - **Profile location.**
+    - `~/.dbt/profiles.yml`, dbt's default: outside the repo, so each clone and CI must recreate it by hand.
+    - `dbt/profiles.yml`, committed, reading `env_var()` (chosen).
+  - **Credentials.**
+    - Literal values in the profile: a committed secret.
+    - `env_var()` with defaults: a missing variable would connect somewhere unexpected.
+    - `env_var()` with no default (chosen).
+- **Why:**
+  - The newest stable pair inside the locked stack, with a 1.12.x / 1.11.x range so patch fixes come in only through `uv lock`.
+  - The profile is versioned with the project, and credentials stay in the environment, the same as every other command here ([D-025](#d-025-extraction-settings-come-from-the-environment-only-supplied-by---env-file-env)).
+  - A missing variable fails with `Env var required but not provided: '<NAME>'`.
+- **Consequences:**
+  - dbt-postgres brings `psycopg2-binary` as its own driver, next to the project's psycopg 3 ([D-021](#d-021-postgres-driver-psycopg-3)). The two don't interact.
+  - **dbt-core 1.12 loads `.env` by itself.** `dbt/cli/main.py` calls `load_dotenv(find_dotenv(usecwd=True), override=False)` on every invocation, and there is no flag to turn it off.
+    - So from the repo root, dbt fills in a `POSTGRES_*` variable missing from the environment with the value in the root `.env`. Variables already set still win, so the documented `--env-file .env` command behaves the same.
+    - This differs from D-025's environment-only rule for our own code, and it is dbt's behavior, not ours. The documented command keeps `--env-file .env`, so it also works where `.env` is absent (CI).
+    - `tests/test_dbt.py` runs dbt from a temporary directory, so a missing variable really fails there.
+- **Source:** `pyproject.toml`, `uv.lock`, `dbt/profiles.yml`, `dbt/dbt_project.yml`; PyPI JSON for dbt-core, dbt-postgres and dbt-adapters (read 2026-10-31); [`etl/03-dbt-star-schema.md`](etl/03-dbt-star-schema.md).
+
+## D-027: Two dbt layers with exact schema names, `stg` (views) and `marts` (tables)
+
+- **Date:** 2026-10-31
+- **Decision:**
+  - `stg_` models are light views, one per staging table, in schema `stg`. They rename columns to one convention: each key is `<entity>_id` (`project_id` → `team_id`, `account_id` → `user_id`, `assignee_account_id` → `assignee_user_id`). They do nothing else.
+  - Dimensions and facts are tables in schema `marts`.
+  - `dbt/macros/generate_schema_name.sql` overrides dbt's macro so a model's `+schema` is used as is.
+  - Two vars, both used only by the tests:
+    - `staging_schema` (default `staging`), the source schema;
+    - `schema_suffix` (default empty), appended to every built schema.
+- **Context:** dbt's built-in `generate_schema_name` returns `<profile schema>_<custom schema>`. With a profile schema of `marts`, it would build `marts_stg` and `marts_marts`.
+- **Options considered:**
+  - **Layers.** One layer (marts straight from sources); stg views plus marts tables (chosen); an extra intermediate layer (nothing to put in it yet).
+  - **Materialization of `stg_`.** Views (chosen): always current after a reload, no storage, cheap at 2,500 rows. Tables: would need a dbt run after every load to stay current.
+  - **Schema names.**
+    - dbt's default concatenation;
+    - setting the profile schema per run;
+    - overriding the macro (chosen).
+  - **Test isolation.** Running the dbt tests on the real `stg`/`marts` (breaks the Session 2 rule that tests never touch real schemas); a second database (needs `CREATE DATABASE` and a second profile target); vars for the source schema and a suffix (chosen).
+- **Why:**
+  - Two layers keep renaming apart from modeling: a staging column rename touches one view.
+  - The macro override is the documented dbt mechanism, and it is six lines.
+  - The suffix lets pytest build `stg_test` and `marts_test` from `staging_test` with the same project and profile. The default run is unaffected.
+- **Consequences:**
+  - The schema names are global. Two people building into one database would collide, because there is no per-developer prefix. That is fine for a single-user pipeline.
+  - Nodes without a custom schema (dbt tests) resolve to the profile schema, `marts`.
+  - Views over staging survive `load_staging`, because it truncates in place ([D-022](#d-022-staging-reloads-by-truncate-and-copy-drop-and-recreate-only-on---rebuild)). `tests/test_dbt.py` checks that the view oids are unchanged after a reload.
+- **Source:** `dbt/dbt_project.yml`, `dbt/macros/generate_schema_name.sql`, `dbt/models/staging/`; [`etl/03-dbt-star-schema.md`](etl/03-dbt-star-schema.md).
+
+## D-028: Star schema with natural keys and no date dimension
+
+- **Date:** 2026-10-31
+- **Decision:**
+  - Dimensions: `dim_team`, `dim_user`, `dim_sprint`, `dim_issue`.
+  - Facts:
+    - `fct_status_transitions`: one row per status change;
+    - `fct_sprint_membership`: one row per issue joining a sprint, with `added_at`;
+    - `fct_capacity`: one row per team and sprint.
+  - Keys are the source system's natural keys (Jira IDs, and team key plus sprint ID for capacity). No surrogate keys. No date dimension in v1.
+- **Context:** the grain was locked earlier (CLAUDE.md, "Star schema grain"). Session 4 metrics compare exact timestamps with sprint boundaries ([D-012](#d-012-sprint-metrics-compare-exact-timestamps)).
+- **Options considered:**
+  - **Keys.**
+    - Surrogate keys (hashed or sequence): they protect against key reuse across sources and support slowly changing dimensions. There is one source here and no history of dimension changes.
+    - Natural keys (chosen).
+  - **Date dimension.**
+    - A calendar table, the usual choice for BI filtering by week or month;
+    - none in v1 (chosen).
+  - **Membership.**
+    - A sprint ID on the issue dimension: loses `added_at`, and can't hold more than one sprint per issue.
+    - A separate fact (chosen).
+- **Why:**
+  - Natural keys can be read in any query and joined back to staging and `raw_data/` without a lookup. Every key is already unique and stable in the source.
+  - The metrics need instants, not calendar attributes. A date dimension was already listed as a cut candidate (CLAUDE.md, "If behind schedule").
+- **Consequences:**
+  - A real Jira migration that renumbers IDs would need surrogate keys.
+  - Power BI date slicing will need a date table, built in the report or added in v1.1.
+- **Source:** [`etl-plan.md`](etl-plan.md) Session 3; [`etl/03-dbt-star-schema.md`](etl/03-dbt-star-schema.md).
+
+## D-029: A user's team is derived from the issues assigned to them
+
+- **Date:** 2026-10-31
+- **Decision:** `dim_user.team_id` is the team of the issues assigned to the user. A test checks that every user maps to exactly one team.
+- **Context:**
+  - The API exposes no user-to-team link, so staging has none ([`etl/02-staging.md`](etl/02-staging.md)).
+  - The domain model has exactly one team per user, a stated v1 limitation ([`domain-model.md`](domain-model.md), "Known v1 limitations").
+  - In the shipped data, all 530 issues have an assignee, and each of the 12 users is assigned issues in one team only.
+- **Options considered:**
+  - no team on users;
+  - a hand-written mapping (a seed file): a second source of truth to keep in sync;
+  - the most frequent team among assigned issues: hides a user who works across teams;
+  - the team of assigned issues, with a test that there is exactly one (chosen).
+- **Why:** it uses only data the API returns, and it turns the v1 limitation into a check. If a user is ever assigned issues in two teams, the test fails instead of a team being picked silently.
+- **Consequences:**
+  - A user with no assigned issues would get no team and fail the test. There is none today.
+  - Reporters and changelog authors are not used for the derivation.
+- **Source:** `dbt/models/marts/dim_user.sql` (step 3.2); [`etl/03-dbt-star-schema.md`](etl/03-dbt-star-schema.md).

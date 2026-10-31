@@ -12,6 +12,8 @@ The tools for the pipeline are locked. This page records what each one does here
 | CI | **GitHub Actions** | Lives next to the code, free for this repository, and can start a Postgres service container so the pipeline and dbt tests run against a real database on every push. |
 | Dashboard | **Power BI** | Connects directly to PostgreSQL, and Power BI Desktop is free. It is a common requirement in the analytics roles this portfolio targets. |
 
+Versions in use: dbt-core 1.12 with the dbt-postgres 1.11 adapter, both added with uv ([D-026](decisions.md#d-026-dbt-core-112-with-dbt-postgres-111-in-dbt-profile-from-the-environment)).
+
 Supporting tools, also fixed: `uv` for dependencies, `pytest` for tests, FastAPI and uvicorn for the mock API.
 
 **Constraint to plan for:** Power BI Desktop runs only on Windows. On macOS, building the dashboard needs a Windows VM or machine. The Power BI web service can view and lightly edit reports, but it is not a full replacement for Desktop.

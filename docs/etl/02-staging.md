@@ -9,7 +9,7 @@ Status: done (Session 2). All eight tables load, and they are reconciled with `r
 
 ## Purpose
 
-Loads the raw pages in `landing/` into typed tables in the Postgres `staging` schema. Staging is a clean mirror: Jira's field names and formats become typed, named columns, and nothing is interpreted, aggregated or joined. Business logic starts in dbt ([03-dbt.md](03-dbt.md)).
+Loads the raw pages in `landing/` into typed tables in the Postgres `staging` schema. Staging is a clean mirror: Jira's field names and formats become typed, named columns, and nothing is interpreted, aggregated or joined. Business logic starts in dbt ([03-dbt-star-schema.md](03-dbt-star-schema.md)).
 
 The code is two modules:
 

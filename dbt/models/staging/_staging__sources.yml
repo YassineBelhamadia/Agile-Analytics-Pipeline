@@ -1,0 +1,27 @@
+version: 2
+
+sources:
+  - name: staging
+    description: >
+      Typed mirror of the landed API pages, loaded by ingestion.load_staging
+      (docs/etl/02-staging.md). Truncated and reloaded in place, so views on
+      these tables survive a reload. The `staging_schema` var exists for the
+      pytest suite, which loads into staging_test.
+    schema: "{{ var('staging_schema', 'staging') }}"
+    tables:
+      - name: teams
+        description: One row per Jira project (a team).
+      - name: users
+        description: One row per Jira account seen as assignee, reporter or changelog author.
+      - name: boards
+        description: One row per agile board.
+      - name: sprints
+        description: One row per sprint, from the board sprint pages.
+      - name: capacity
+        description: One row per team and sprint, from /capacity (our own schema, not Jira's).
+      - name: issues
+        description: One row per issue, from the JQL search pages.
+      - name: status_transitions
+        description: One row per changelog history with a status item.
+      - name: sprint_memberships
+        description: One row per issue joining a sprint, from changelog Sprint items.

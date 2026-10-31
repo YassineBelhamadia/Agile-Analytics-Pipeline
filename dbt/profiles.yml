@@ -1,0 +1,18 @@
+# Connection profile. Every value comes from the environment (POSTGRES_* in the
+# root .env, passed with `uv run --env-file .env`), so this file holds no secret.
+# env_var() without a default fails with "Env var required but not provided".
+
+aap:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('POSTGRES_HOST') }}"
+      port: "{{ env_var('POSTGRES_PORT') | as_number }}"
+      user: "{{ env_var('POSTGRES_USER') }}"
+      password: "{{ env_var('POSTGRES_PASSWORD') }}"
+      dbname: "{{ env_var('POSTGRES_DB') }}"
+      # Fallback only: every model folder sets its own schema (dbt_project.yml).
+      schema: marts
+      threads: 4
+      connect_timeout: 10

@@ -5,7 +5,7 @@ This plan lists every commit for ETL Sessions 2 to 5. Each step gives its ID, sc
 Rules for this file:
 
 - **Messages are verbatim.** A step's commit message is used exactly as written here. If it no longer fits the change, stop and ask. Do not edit it on the fly.
-- **Provisional steps.** Sessions 3 to 5 are outlines. Their messages are *provisional, finalized at session start*, and each of those sessions is detailed in this file (scope, files, gates, final messages) and confirmed before work begins.
+- **Provisional steps.** Sessions 4 and 5 are outlines (Session 3 was detailed and confirmed on 2026-10-31). Their messages are *provisional, finalized at session start*, and each of those sessions is detailed in this file (scope, files, gates, final messages) and confirmed before work begins.
 - **Format.** Conventional Commits with type `feat`, `fix`, `refactor`, `docs`, `chore`, `test` or `ci`. The subject is 72 characters or fewer, then a blank line, then a 1–3 line body. Never mention Claude, and never add co-author or session trailers. `.githooks/commit-msg` enforces this ([`workflow.md`](workflow.md#hooks)).
 - **Targets.** Counts come from the shipped dataset (SEED=22) in [`CLAUDE.md`](../CLAUDE.md#shipped-dataset-seed22-verification-targets).
 
@@ -15,10 +15,10 @@ Rules for this file:
 | 2.1b | 2 | `refactor(staging): truncate and reload instead of drop and recreate` | done |
 | 2.2 | 2 | `feat(staging): load issues, status transitions and sprint memberships` | done |
 | 2.3 | 2 | `test(staging): reconcile staging with raw_data and add sabotage checks` | done |
-| 3.1 | 3 | `chore(dbt): initialize project with staging sources` | provisional |
-| 3.2 | 3 | `feat(dbt): add team, user, sprint and issue dimensions` | provisional |
-| 3.3 | 3 | `feat(dbt): add status transition fact and capacity model` | provisional |
-| 3.4 | 3 | `test(dbt): add relationship and data quality tests` | provisional |
+| 3.1 | 3 | `chore(dbt): initialize project with staging sources` | done |
+| 3.2 | 3 | `feat(dbt): add team, user, sprint and issue dimensions` | confirmed |
+| 3.3 | 3 | `feat(dbt): add status transition fact and capacity model` | confirmed |
+| 3.4 | 3 | `test(dbt): add relationship and data quality tests` | confirmed |
 | 4.1 | 4 | `feat(metrics): add sprint metrics reconciled with sprint_report` | provisional |
 | 4.2 | 4 | `feat(metrics): add business question models 1 to 3` | provisional |
 | 4.3 | 4 | `feat(metrics): add business question models 4 to 6` | provisional |
@@ -184,18 +184,110 @@ Compares staging row by row with raw_data and checks that changelog and sprint-l
 
 ---
 
-## Session 3: dbt star schema (outline, to be detailed before the session starts)
+## Session 3: dbt star schema
 
-Branch: `feat/etl-session-3`. Commit messages below are *provisional, finalized at session start*.
+Branch: `feat/etl-session-3`. Detailed and confirmed at session start (2026-10-31). At most 4 commits. Stop for Yassine's review after step 3.2 and after step 3.4.
 
-- **3.1:** dbt Core project under `dbt/`, a profile that reads `POSTGRES_*`, and the `staging` tables declared as sources.
-  - `chore(dbt): initialize project with staging sources`
-- **3.2:** dimensions: team, user, sprint, issue.
-  - `feat(dbt): add team, user, sprint and issue dimensions`
-- **3.3:** fact table at one row per status transition. Capacity model keyed by team and sprint.
-  - `feat(dbt): add status transition fact and capacity model`
-- **3.4:** relationship tests (the foreign keys staging leaves out), unique and not-null tests, and count tests against the shipped targets.
-  - `test(dbt): add relationship and data quality tests`
+**Goal.** A dbt Core project on top of the `staging` schema: light `stg_` views, then a star schema of natural-keyed dimensions and facts that Session 4's metrics read from. Stage page: [`etl/03-dbt-star-schema.md`](etl/03-dbt-star-schema.md).
+
+### Spec (applies to all four steps)
+
+Decisions already made at session start. Each is recorded, with the options considered, in [`decisions.md`](decisions.md) (D-026 to D-029).
+
+- **Location and tools.**
+  - The dbt project lives in `dbt/` at the repo root: dbt Core with the Postgres adapter, added with uv.
+  - `dbt/profiles.yml` reads every credential from `POSTGRES_*` with `env_var()`, so no secret is committed.
+  - Command: `uv run --env-file .env dbt <cmd> --project-dir dbt --profiles-dir dbt`.
+- **Two layers.**
+  - `stg_` models are light views, one per staging table, with consistent names, in a schema called `stg`.
+  - Dimensions and facts are tables in a schema called `marts`.
+  - dbt uses exactly these schema names: `generate_schema_name` is overridden.
+- **Star schema.**
+  - Dimensions: `dim_team`, `dim_user`, `dim_sprint`, `dim_issue`.
+  - Facts:
+    - `fct_status_transitions`: one row per status change;
+    - `fct_sprint_membership`: an issue joining a sprint, with `added_at`;
+    - `fct_capacity`: grain team and sprint.
+  - Natural keys, no surrogate keys. No date dimension in v1: the exact timestamps carry what the metrics need.
+- **Users and teams.** The API exposes no team on users. Each user's team is derived from the teams of the issues assigned to them. A test checks that every user maps to exactly one team (the v1 limitation in [`domain-model.md`](domain-model.md)).
+- **Reload safety.** Staging tables persist across reloads ([D-022](decisions.md#d-022-staging-reloads-by-truncate-and-copy-drop-and-recreate-only-on---rebuild)), so dbt views over them must survive `load_staging`. A test proves it.
+- **Ignored files.** `dbt/target/`, `dbt/logs/` and `dbt/dbt_packages/` go in `.gitignore`.
+- **Tests never touch the real schemas.** As in Session 2, pytest loads staging into `staging_test`. dbt then builds into `stg_test` and `marts_test`, through two vars (`staging_schema`, `schema_suffix`).
+
+### Step 3.1: dbt project and staging sources
+
+- **Scope.** dbt Core and the Postgres adapter, the profile, the schema name override, the 8 staging tables as sources, and one `stg_` view per table.
+- **Expected files.**
+  - `pyproject.toml`, `uv.lock`, `.gitignore`
+  - `dbt/dbt_project.yml`, `dbt/profiles.yml`, `dbt/macros/generate_schema_name.sql`
+  - `dbt/models/staging/_staging__sources.yml`, `dbt/models/staging/stg_*.sql` (8)
+  - `tests/test_dbt.py`
+  - `docs/etl-plan.md` (this section), `docs/etl/03-dbt-star-schema.md` (purpose, layers, how to run, decisions so far), `docs/decisions.md`, `docs/stack.md`, `CLAUDE.md`
+- **Gate.**
+  - `dbt debug` passes.
+  - `dbt build` creates the 8 `stg_` views.
+  - Row counts through the views: 3 teams, 12 users, 3 boards, 36 sprints, 36 capacity, 530 issues, 1,488 transitions, 320 memberships.
+  - After running `load_staging` again, the views still work.
+  - Sabotage: a wrong credential variable makes `dbt debug` fail with a clear error.
+- **Commit message:**
+
+```
+chore(dbt): initialize project with staging sources
+
+Adds dbt Core with the Postgres adapter, a profile that reads credentials from the environment, and sources plus light stg_ views over the 8 staging tables.
+```
+
+### Step 3.2: dimensions
+
+- **Scope.** `dim_team`, `dim_user`, `dim_sprint` and `dim_issue` as tables in `marts`, with unique, not null and relationship tests. Users get their team from the issues assigned to them.
+- **Gate.**
+  - Counts are 3, 12, 36 and 530.
+  - Every key is unique and not null, and the relationships hold.
+  - Each user maps to exactly one team.
+  - Sabotage: delete or duplicate a staging row, show the specific test fails, then reload staging.
+- **Commit message:**
+
+```
+feat(dbt): add team, user, sprint and issue dimensions
+
+Adds dim_team, dim_user, dim_sprint and dim_issue as tables in the marts schema, with unique, not null and relationship tests. Users get their team from the issues assigned to them.
+```
+
+### Step 3.3: facts
+
+- **Scope.** `fct_status_transitions`, `fct_sprint_membership` and `fct_capacity`, with relationship tests and accepted-value tests on status names.
+- **Gate.**
+  - Counts are 1,488, 320 and 36.
+  - Joining the transition fact to all four dimensions returns exactly 1,488 rows: no lost rows, no duplicates.
+  - Sabotage: an orphan row (an issue ID that doesn't exist) makes the relationship test fail.
+- **Commit message:**
+
+```
+feat(dbt): add status transition fact and capacity model
+
+Adds fct_status_transitions, fct_sprint_membership and fct_capacity with relationship and accepted-value tests on status names.
+```
+
+### Step 3.4: data quality tests and final docs
+
+- **Scope.**
+  - Row-count tests, a non-Epic story point test and a one-team-per-user test.
+  - A check that sprint `complete_at` matches `raw_data/`. It is carried over from Session 2: `complete_at` in `staging.sprints` must match `raw_data/sprints.json`, with the same independent approach and timestamp rule as the existing reconciliation ([D-024](decisions.md#d-024-reconciliation-truncates-raw-timestamps-to-milliseconds)).
+    - Found at step 3.1: `raw_data/sprints.json` has no completion field (`sprint_id`, `team_id`, `name`, `state`, `start_date`, `end_date` only). The mock API sets `completeDate` = `endDate` for closed sprints (`mock_api/serializers.py`, `_sprint_dates`). So the only raw counterpart is: closed means `end_date` at 09:00 UTC, otherwise null. To confirm at the 3.2 review.
+  - Finalise [`etl/03-dbt-star-schema.md`](etl/03-dbt-star-schema.md): a Mermaid schema diagram, the grain of each table, the test list and the known limits.
+- **Gate.**
+  - `dbt test` passes in full.
+  - At least three sabotage cases, each failing the right test: a null key, a duplicate key and a changed `complete_at` value.
+  - The full pytest suite and the hook tests pass.
+- **Commit message:**
+
+```
+test(dbt): add relationship and data quality tests
+
+Adds row-count, non-Epic story point and one-team-per-user tests, plus a check that sprint complete_at matches raw_data.
+```
+
+**Final report after 3.4:** a summary table of the four commits, the final counts in `marts`, and what Session 4 (metrics) can rely on.
 
 ## Session 4: metrics and business questions (outline, to be detailed before the session starts)
 

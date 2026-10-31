@@ -1,0 +1,24 @@
+# dbt project for the AAP warehouse: staging tables -> stg views -> marts star schema.
+# Run from the repo root:
+#   uv run --env-file .env dbt <cmd> --project-dir dbt --profiles-dir dbt
+# Docs: docs/etl/03-dbt-star-schema.md
+
+name: aap
+version: "1.0.0"
+profile: aap
+
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+clean-targets: ["target", "logs"]
+
+flags:
+  send_anonymous_usage_stats: false
+
+# Schema names are exact (stg, marts), not dbt's default <target schema>_<custom schema>.
+# See macros/generate_schema_name.sql.
+models:
+  aap:
+    staging:
+      +schema: stg
+      +materialized: view

@@ -20,12 +20,11 @@ defensible in an interview, including the options we rejected.
 
 ## Repo layout
 - `simulator/`: SimPy simulator, per-team random streams, persistence. Done. Do not touch unless asked.
-- `scripts/`: `generate_raw_data.py` writes `raw_data/` (ground truth, gitignored, regenerable);
-  `check_warehouse.py`; `test_hooks.sh`.
+- `scripts/`: `generate_raw_data.py` writes `raw_data/` (ground truth, gitignored, regenerable); `check_warehouse.py`; `test_hooks.sh`.
 - `mock_api/`: FastAPI app, Jira-shaped endpoints plus `/capacity`, from `raw_data/`. Done, capacity included.
 - `ingestion/`: `client.py` + `extract.py` land raw pages and `manifest.json` in gitignored `landing/`;
   `parse.py` + `load_staging.py` fill all 8 `staging` tables, reconciled with `raw_data/`. `tests/`: pytest, no server.
-- `warehouse/`: `docker-compose.yml` for Postgres (smoke and persistence checks pass), then dbt.
+- `warehouse/`: `docker-compose.yml` for Postgres. `dbt/`: dbt project, `stg` views over staging, then `marts` tables.
 - `.githooks/` + `.claude/settings.json`: hooks, permissions. `dashboard/`: Power BI, later. `docs/`: source of truth.
 
 ## Stack (locked, do not redesign; reasons in `docs/stack.md`)
@@ -91,6 +90,7 @@ counts must match these. Staging also equals raw_data/ row by row (raw timestamp
 - Extract (mock API running; `AAP_API_*` in `.env`, env vars only, D-025):
   `uv run --env-file .env python -m ingestion.extract` -> `landing/`
 - Load staging: `uv run --env-file .env python -m ingestion.load_staging` (truncate + reload; `--rebuild` for schema changes)
+- dbt: `uv run --env-file .env dbt build --project-dir dbt --profiles-dir dbt` (or `debug`; dbt also reads `.env` itself, D-026)
 - Tests: `uv run --env-file .env python -m pytest -rs` (Postgres tests skip without `POSTGRES_*`; gates need 0 skipped)
 - Hooks: `sh scripts/test_hooks.sh`; enable once per clone (Yassine only): `git config core.hooksPath .githooks`
 
@@ -113,7 +113,7 @@ counts must match these. Staging also equals raw_data/ row by row (raw timestamp
 0. Session 0: workflow scaffolding (plan, hooks, permissions, docs skeleton)
 1. Session 1: capacity endpoint, Postgres in Docker, extraction client (done)
 2. Session 2: parsing and staging tables (done, on `feat/etl-session-2`)
-3. Session 3: dbt star schema (next; outline in `docs/etl-plan.md`)
+3. Session 3: dbt star schema (in progress on `feat/etl-session-3`; detailed in `docs/etl-plan.md`)
 4. Session 4: sprint metrics and the six business questions, reconciled with sprint_report.py
 5. Session 5: one-command pipeline, tests, CI, docs, clean run from an empty database
 
