@@ -343,3 +343,20 @@ The narrative record of the early project decisions, with the full argument for 
   - Staging timestamps are millisecond-precise.
   - Session 4 metrics compare them with sprint boundaries. No boundary comparison is affected in the shipped data ([`etl-plan.md`](etl-plan.md), Session 4).
 - **Source:** `tests/test_staging_reconciliation.py`; [`etl/02-staging.md`](etl/02-staging.md), "Reconciliation with raw_data/".
+
+## D-025: Extraction settings come from the environment only, supplied by `--env-file .env`
+
+- **Date:** 2026-10-30
+- **Decision:** `ingestion.extract` keeps reading `AAP_API_BASE_URL` and `AAP_API_TOKEN` from the process environment only. Both are listed in `.env.example`, and the documented command is `uv run --env-file .env python -m ingestion.extract`. The base URL is checked (absolute `http`/`https` with a host) before any request.
+- **Context:**
+  - `.env.example` listed only `POSTGRES_*`. A `.env` copied from it held no API settings, so `uv run --env-file .env python -m ingestion.extract` failed with `Missing AAP_API_BASE_URL and AAP_API_TOKEN`, and the docs showed only inline variables.
+  - A malformed base URL (e.g. `localhost:8000`) was retried 3 times, then failed with an httpx message that did not name the variable.
+- **Options considered:**
+  - load `.env` inside the client (e.g. python-dotenv): hides where settings come from, adds a dependency, and differs from how every other command here gets credentials;
+  - keep inline variables only: works, but leaves `.env` incomplete and the setup undocumented;
+  - list the variables in `.env.example` and use `--env-file .env`, like Postgres (chosen).
+- **Why:** one way to supply settings across the repo, with no change to the locked environment-only design. Bad values fail at once with an error naming the variable.
+- **Consequences:**
+  - Running without `--env-file .env` and with no inline variables still fails, by design, now with a message that says how to fix it.
+  - The error for a malformed URL does not echo its value, only its length.
+- **Source:** `ingestion/extract.py` (`client_from_environment`); `.env.example`; [`etl/01-extraction.md`](etl/01-extraction.md).

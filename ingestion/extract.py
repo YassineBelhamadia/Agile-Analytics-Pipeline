@@ -1,11 +1,12 @@
 """Extract everything from the mock API and land the raw responses.
 
-Run from the repo root with the mock API serving:
+Run from the repo root with the mock API serving and both variables in .env
+(copied from .env.example):
 
-    AAP_API_BASE_URL=http://localhost:8000 AAP_API_TOKEN=<any> \
-        uv run python -m ingestion.extract [landing_dir]
+    uv run --env-file .env python -m ingestion.extract [landing_dir]
 
-Inputs: the API at AAP_API_BASE_URL, with AAP_API_TOKEN as a Bearer token.
+Inputs: the API at AAP_API_BASE_URL, with AAP_API_TOKEN as a Bearer token,
+read from the process environment only.
 Outputs: one file per response page under landing_dir (default landing/),
 plus manifest.json. Documented in docs/etl/01-extraction.md.
 
@@ -40,6 +41,7 @@ import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from ingestion.client import ExtractionError, JiraClient, Page
 
@@ -169,16 +171,28 @@ def run_extraction(client: JiraClient, landing_dir: Path | str, sizes: PageSizes
 def client_from_environment() -> JiraClient:
     """Build a client from AAP_API_BASE_URL and AAP_API_TOKEN.
 
+    Only the process environment is read. `.env` reaches it through
+    `uv run --env-file .env`, never by loading it here.
+
     Raises:
-        ExtractionError: Naming whichever variable is missing.
+        ExtractionError: Naming whichever variable is missing, or a base URL
+            that is not an absolute http(s) URL.
     """
     missing = [name for name in (ENV_BASE_URL, ENV_TOKEN) if not os.environ.get(name, "").strip()]
     if missing:
         raise ExtractionError(
-            f"Missing {' and '.join(missing)}. Set the mock API's base URL and a token, "
+            f"Missing {' and '.join(missing)}. Add them to .env (see .env.example) and run "
+            f"with `uv run --env-file .env`, or set them inline, "
             f"e.g. {ENV_BASE_URL}=http://localhost:8000 {ENV_TOKEN}=any-non-empty-value."
         )
-    return JiraClient.for_base_url(os.environ[ENV_BASE_URL].strip(), os.environ[ENV_TOKEN])
+    base_url = os.environ[ENV_BASE_URL].strip()
+    parsed = urlsplit(base_url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ExtractionError(
+            f"{ENV_BASE_URL} is not an absolute http(s) URL (length {len(base_url)}). "
+            f"Include the scheme and host, e.g. {ENV_BASE_URL}=http://localhost:8000."
+        )
+    return JiraClient.for_base_url(base_url, os.environ[ENV_TOKEN])
 
 
 def main(argv: list[str]) -> int:

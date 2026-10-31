@@ -16,8 +16,9 @@ The code is two modules:
 **Inputs**
 
 - **Mock API.** It must be running, e.g. `uv run uvicorn mock_api.app:app --port 8000`.
-- **`AAP_API_BASE_URL`.** The API's base URL. Required.
+- **`AAP_API_BASE_URL`.** The API's base URL. Required, and must be an absolute `http://` or `https://` URL with a host. Anything else fails before the first request, with an error naming the variable.
 - **`AAP_API_TOKEN`.** Sent as `Authorization: Bearer <token>`. Required and non-empty. The mock accepts any non-empty value.
+- **Where they come from.** The process environment only. Both are listed in `.env.example`, so a copied `.env` works once it is passed with `uv run --env-file .env`. The client never reads `.env` itself ([D-025](../decisions.md#d-025-extraction-settings-come-from-the-environment-only-supplied-by---env-file-env)). Setting them inline also works.
 - **Landing directory (optional).** The first command-line argument. Default: `landing/` at the repo root.
 
 **Outputs**
@@ -75,19 +76,20 @@ That is 578 pages plus the manifest, 579 files at the default page sizes. Page n
 
 ## How to run
 
-From the repo root, with `raw_data/` generated (`uv run python scripts/generate_raw_data.py`):
+From the repo root, with `raw_data/` generated (`uv run python scripts/generate_raw_data.py`) and `.env` copied from `.env.example`:
 
 ```bash
-uv run uvicorn mock_api.app:app --port 8000          # terminal 1
-AAP_API_BASE_URL=http://localhost:8000 AAP_API_TOKEN=any-value \
-  uv run python -m ingestion.extract                 # terminal 2; optional arg: landing dir
+uv run uvicorn mock_api.app:app --port 8000                # terminal 1
+uv run --env-file .env python -m ingestion.extract         # terminal 2; optional arg: landing dir
 ```
 
-Prints `Landed raw responses in <dir>` and a page count per folder. Exits 0 on success. On an `ExtractionError` (for example a missing variable or a 401), it prints `Extraction failed: ...` to stderr and exits 1.
+Without `--env-file .env` (and without the variables set inline), the run fails with `Missing AAP_API_BASE_URL and AAP_API_TOKEN`.
+
+Prints `Landed raw responses in <dir>` and a page count per folder. Exits 0 on success. On an `ExtractionError` (for example a missing variable, a malformed base URL or a 401), it prints `Extraction failed: ...` to stderr and exits 1.
 
 ## How it is verified
 
-`uv run python -m pytest tests/test_extraction.py`: 13 tests (11 functions, one parametrized three ways). They run the whole extraction in-process: FastAPI's `TestClient` is an `httpx.Client`, so it is injected into `JiraClient` with no server started. They use the real `raw_data/`, and fail if it is missing.
+`uv run python -m pytest tests/test_extraction.py`: 18 tests (13 functions; two parametrized, three and four ways). They run the whole extraction in-process: FastAPI's `TestClient` is an `httpx.Client`, so it is injected into `JiraClient` with no server started. They use the real `raw_data/`, and fail if it is missing.
 
 | Test | What it proves |
 |---|---|
@@ -98,6 +100,8 @@ Prints `Landed raw responses in <dir>` and a page count per folder. Exits 0 on s
 | `test_second_run_is_byte_identical` | A rerun into the same directory is byte-identical and leaves no `.landing*` scratch directories. |
 | `test_sabotage_stopping_one_page_early_fails_the_count_check` | **Sabotage:** a client that drops the last page of every multi-page stream fails the count check (35 capacity rows, fewer than 530 issues). |
 | `test_missing_environment_fails_loudly` | Missing variables raise an error naming them, and `main` exits 1. |
+| `test_env_example_lists_the_extraction_settings` | `.env.example` lists both variables, so a copied `.env` is enough with `--env-file .env`. |
+| `test_malformed_base_url_fails_before_any_request[4 URLs]` | A base URL with no scheme, a broken scheme, a non-http scheme or no host raises an error naming `AAP_API_BASE_URL` and showing a valid example. |
 | `test_empty_token_is_refused_before_any_request` | A blank token is refused when the client is built. |
 | `test_rejected_token_fails_loudly_and_keeps_the_previous_landing` | A 401 raises an error naming `AAP_API_TOKEN`. The previous landing is unchanged, and no scratch directory is left. |
 | `test_transient_errors_are_retried` | A 503 or a connection error is retried. Three 500s give up after 3 attempts. |

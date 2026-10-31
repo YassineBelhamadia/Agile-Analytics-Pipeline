@@ -174,6 +174,21 @@ def test_missing_environment_fails_loudly(monkeypatch: pytest.MonkeyPatch, capsy
         extract.client_from_environment()
 
 
+def test_env_example_lists_the_extraction_settings() -> None:
+    # A .env copied from .env.example must be enough for `uv run --env-file .env`.
+    example = (extract.REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+    keys = {line.split("=", 1)[0] for line in example.splitlines() if "=" in line and not line.startswith("#")}
+    assert {extract.ENV_BASE_URL, extract.ENV_TOKEN} <= keys
+
+
+@pytest.mark.parametrize("url", ["localhost:8000", "http//localhost:8000", "ftp://localhost:8000", "http://"])
+def test_malformed_base_url_fails_before_any_request(monkeypatch: pytest.MonkeyPatch, url: str) -> None:
+    monkeypatch.setenv(extract.ENV_BASE_URL, url)
+    monkeypatch.setenv(extract.ENV_TOKEN, "any")
+    with pytest.raises(ExtractionError, match=r"AAP_API_BASE_URL .*http://localhost:8000"):
+        extract.client_from_environment()
+
+
 def test_empty_token_is_refused_before_any_request(app: TestClient) -> None:
     with pytest.raises(ExtractionError, match="token is empty"):
         JiraClient(app, token="   ")

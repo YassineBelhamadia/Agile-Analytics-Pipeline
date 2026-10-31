@@ -88,8 +88,8 @@ counts must match these. Staging also equals raw_data/ row by row (raw timestamp
   `docker compose --env-file .env -f warehouse/docker-compose.yml up -d --wait`
 - Postgres smoke check: `uv run --env-file .env python scripts/check_warehouse.py` (`--persistence`
   also restarts the container and checks a row survives); down: compose command with `down`, never `-v`
-- Extract (mock API running): `AAP_API_BASE_URL=http://localhost:8000 AAP_API_TOKEN=<any>
-  uv run python -m ingestion.extract` -> `landing/`
+- Extract (mock API running; `AAP_API_*` in `.env`, env vars only, D-025):
+  `uv run --env-file .env python -m ingestion.extract` -> `landing/`
 - Load staging: `uv run --env-file .env python -m ingestion.load_staging` (truncate + reload; `--rebuild` for schema changes)
 - Tests: `uv run --env-file .env python -m pytest -rs` (Postgres tests skip without `POSTGRES_*`; gates need 0 skipped)
 - Hooks: `sh scripts/test_hooks.sh`; enable once per clone (Yassine only): `git config core.hooksPath .githooks`
