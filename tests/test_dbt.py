@@ -29,7 +29,7 @@ import yaml
 from psycopg import sql
 
 from ingestion import load_staging as loader
-from test_staging import EXPECTED, TEST_SCHEMA, connect_or_fail, landing  # noqa: F401  (fixture)
+from test_staging import EXPECTED, RAW_DATA, TEST_SCHEMA, connect_or_fail, landing  # noqa: F401  (fixture)
 
 DBT_DIR = Path(__file__).resolve().parent.parent / "dbt"
 DBT = Path(sys.executable).with_name("dbt")
@@ -40,6 +40,8 @@ VARS = json.dumps({"staging_schema": TEST_SCHEMA, "schema_suffix": SUFFIX})
 STG_VIEWS = {f"stg_{table}": count for table, count in EXPECTED.items()}
 """One stg_ view per staging table, with the shipped dataset's row counts."""
 
+DIMENSIONS = {"dim_team": 3, "dim_user": 12, "dim_sprint": 36, "dim_issue": 530}
+
 
 def run_dbt(tmp_path: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     command = [
@@ -49,6 +51,16 @@ def run_dbt(tmp_path: Path, *args: str, env: dict[str, str] | None = None) -> su
     if args[0] != "debug":  # debug takes neither
         command += ["--target-path", str(tmp_path / "target"), "--vars", VARS]
     return subprocess.run(command, capture_output=True, text=True, env=env or os.environ.copy(), cwd=tmp_path)
+
+
+def failed_tests(tmp_path: Path) -> set[str]:
+    """Names of the dbt tests that failed or errored in the last run (from run_results.json)."""
+    results = json.loads((tmp_path / "target" / "run_results.json").read_text())["results"]
+    return {
+        r["unique_id"].split(".")[2]
+        for r in results
+        if r["unique_id"].startswith("test.") and r["status"] in ("fail", "error")
+    }
 
 
 def drop_dbt_test_schemas(connection: psycopg.Connection) -> None:
@@ -136,9 +148,92 @@ def test_stg_views_build_count_and_survive_a_staging_reload(warehouse, landing: 
 
 @pytest.mark.postgres
 def test_dbt_never_writes_outside_the_test_schemas(warehouse, tmp_path: Path) -> None:
-    """With the test vars, the compiled sources and models point at the _test schemas only."""
-    result = run_dbt(tmp_path, "compile", "--select", "staging")
+    """With the test vars, every model is in stg_test or marts_test, and the source is staging_test."""
+    result = run_dbt(tmp_path, "parse")
     assert result.returncode == 0, result.stdout
     manifest = json.loads((tmp_path / "target" / "manifest.json").read_text())
-    assert {n["schema"] for n in manifest["nodes"].values() if n["resource_type"] == "model"} == {STG}
+    models = [n for n in manifest["nodes"].values() if n["resource_type"] == "model"]
+    assert {n["schema"] for n in models if n["fqn"][1] == "staging"} == {STG}
+    assert {n["schema"] for n in models if n["fqn"][1] == "marts"} == {MARTS}
+    assert {n["schema"] for n in models} == {STG, MARTS}
     assert {s["schema"] for s in manifest["sources"].values()} == {TEST_SCHEMA}
+
+
+# --- Dimensions ------------------------------------------------------------------
+
+
+@pytest.mark.postgres
+def test_dimensions_build_with_the_shipped_counts_and_pass_their_tests(warehouse, tmp_path: Path) -> None:
+    result = run_dbt(tmp_path, "build")
+    assert result.returncode == 0, result.stdout
+    assert failed_tests(tmp_path) == set()
+    assert counts(warehouse, MARTS, DIMENSIONS) == DIMENSIONS
+    tables = warehouse.execute(
+        "select table_name from information_schema.tables where table_schema = %s and table_type = 'BASE TABLE'",
+        (MARTS,),
+    ).fetchall()
+    assert {name for (name,) in tables} >= set(DIMENSIONS)
+
+
+@pytest.mark.postgres
+def test_derived_user_teams_equal_raw_data(warehouse, tmp_path: Path) -> None:
+    """The team derived from assigned issues (D-029) is each user's team in the simulator's ground truth."""
+    assert run_dbt(tmp_path, "run", "--select", "+dim_user", "+dim_team").returncode == 0
+    team_keys = {t["team_id"]: t["key"] for t in json.loads((RAW_DATA / "teams.json").read_text())}
+    expected = {u["display_name"]: team_keys[u["team_id"]] for u in json.loads((RAW_DATA / "users.json").read_text())}
+    derived = warehouse.execute(
+        sql.SQL("select u.display_name, t.team_key from {} u join {} t using (team_id)").format(
+            sql.Identifier(MARTS, "dim_user"), sql.Identifier(MARTS, "dim_team")
+        )
+    ).fetchall()
+    assert dict(derived) == expected
+
+
+@pytest.mark.postgres
+def test_sabotage_a_deleted_staging_user_fails_the_user_relationships(warehouse, landing: Path, tmp_path: Path) -> None:
+    """Sabotage: delete one staging user. The issues pointing at them fail exactly the relationship tests to dim_user."""
+    user = "Phoenix Dev 1"
+    reported = warehouse.execute(
+        sql.SQL("select count(*) from {} i join {} u on u.account_id = i.reporter_account_id where u.display_name = %s").format(
+            sql.Identifier(TEST_SCHEMA, "issues"), sql.Identifier(TEST_SCHEMA, "users")
+        ),
+        (user,),
+    ).fetchone()[0]
+    warehouse.execute(sql.SQL("delete from {} where display_name = %s").format(sql.Identifier(TEST_SCHEMA, "users")), (user,))
+
+    assert run_dbt(tmp_path, "build").returncode != 0
+    expected = {"relationships_dim_issue_assignee_user_id__user_id__ref_dim_user_"}
+    if reported:
+        expected.add("relationships_dim_issue_reporter_user_id__user_id__ref_dim_user_")
+    assert failed_tests(tmp_path) == expected
+
+    loader.load_staging(warehouse, landing, schema=TEST_SCHEMA)
+    assert run_dbt(tmp_path, "build").returncode == 0
+
+
+@pytest.mark.postgres
+def test_sabotage_a_duplicated_staging_user_fails_unique(warehouse, tmp_path: Path) -> None:
+    """Sabotage: staging's primary key refuses a duplicate user; with the key dropped, unique on dim_user fails."""
+    users = sql.Identifier(TEST_SCHEMA, "users")
+    duplicate = sql.SQL("insert into {} select * from {} limit 1").format(users, users)
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        warehouse.execute(duplicate)
+
+    warehouse.execute(sql.SQL("alter table {} drop constraint users_pkey").format(users))
+    warehouse.execute(duplicate)
+    assert run_dbt(tmp_path, "build").returncode != 0
+    assert failed_tests(tmp_path) == {"unique_dim_user_user_id"}
+
+
+@pytest.mark.postgres
+def test_sabotage_a_user_in_two_teams_fails_the_team_mapping(warehouse, tmp_path: Path) -> None:
+    """Sabotage: move one of a user's issues to another team. The user no longer maps to one team, and not_null fails."""
+    issues, teams = sql.Identifier(TEST_SCHEMA, "issues"), sql.Identifier(TEST_SCHEMA, "teams")
+    warehouse.execute(
+        sql.SQL(
+            "update {} set project_id = (select project_id from {} where project_key = 'ATL') "
+            "where issue_key = (select min(issue_key) from {} where issue_key like 'PHX-%%' and issue_type <> 'Epic')"
+        ).format(issues, teams, issues)
+    )
+    assert run_dbt(tmp_path, "build").returncode != 0
+    assert failed_tests(tmp_path) == {"not_null_dim_user_team_id"}

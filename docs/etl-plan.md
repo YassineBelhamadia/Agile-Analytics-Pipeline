@@ -16,7 +16,7 @@ Rules for this file:
 | 2.2 | 2 | `feat(staging): load issues, status transitions and sprint memberships` | done |
 | 2.3 | 2 | `test(staging): reconcile staging with raw_data and add sabotage checks` | done |
 | 3.1 | 3 | `chore(dbt): initialize project with staging sources` | done |
-| 3.2 | 3 | `feat(dbt): add team, user, sprint and issue dimensions` | confirmed |
+| 3.2 | 3 | `feat(dbt): add team, user, sprint and issue dimensions` | done |
 | 3.3 | 3 | `feat(dbt): add status transition fact and capacity model` | confirmed |
 | 3.4 | 3 | `test(dbt): add relationship and data quality tests` | confirmed |
 | 4.1 | 4 | `feat(metrics): add sprint metrics reconciled with sprint_report` | provisional |

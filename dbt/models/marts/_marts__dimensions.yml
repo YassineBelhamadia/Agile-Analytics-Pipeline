@@ -1,0 +1,122 @@
+version: 2
+
+models:
+  - name: dim_team
+    description: One row per team (Jira project).
+    columns:
+      - name: team_id
+        description: Jira project ID. Primary key.
+        data_tests: [unique, not_null]
+      - name: team_key
+        description: Jira project key (PHX, ATL, NOM). Unique; capacity joins on it.
+        data_tests: [unique, not_null]
+      - name: team_name
+        data_tests: [not_null]
+
+  - name: dim_user
+    description: >
+      One row per Jira account seen as assignee, reporter or changelog author.
+      team_id is derived from the issues assigned to the user (D-029).
+    columns:
+      - name: user_id
+        description: Jira accountId. Primary key.
+        data_tests: [unique, not_null]
+      - name: display_name
+        data_tests: [not_null]
+      - name: team_id
+        description: >
+          The one team of the issues assigned to the user. Null when there are
+          none or more than one, which fails not_null: every user maps to
+          exactly one team in v1.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_team')
+                field: team_id
+
+  - name: dim_sprint
+    description: One row per sprint, with its team (through its board) and its exact UTC instants.
+    columns:
+      - name: sprint_id
+        description: Jira sprint ID. Primary key.
+        data_tests: [unique, not_null]
+      - name: team_id
+        description: Team of the sprint's board. Null if the board is unknown.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_team')
+                field: team_id
+      - name: board_id
+        data_tests: [not_null]
+      - name: sprint_name
+        data_tests: [not_null]
+      - name: sprint_state
+        data_tests:
+          - accepted_values:
+              arguments:
+                values: [future, active, closed]
+      - name: start_at
+        description: Sprint start instant (09:00 UTC). Null only for a future sprint.
+      - name: end_at
+        description: Sprint end instant (09:00 UTC); equals the next sprint's start_at.
+      - name: complete_at
+        description: When the sprint was closed. Null unless closed.
+
+  - name: dim_issue
+    description: One row per issue, with its current status. Epics have null story points.
+    columns:
+      - name: issue_id
+        description: Jira issue ID. Primary key.
+        data_tests: [unique, not_null]
+      - name: issue_key
+        data_tests: [unique, not_null]
+      - name: issue_type
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [Epic, Story, Task, Bug]
+      - name: team_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_team')
+                field: team_id
+      - name: current_status_name
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [To Do, In Progress, Code Review, QA, Done]
+      - name: assignee_user_id
+        description: Nullable in Jira; every issue has one in the shipped data.
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_user')
+                field: user_id
+      - name: reporter_user_id
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_user')
+                field: user_id
+      - name: parent_issue_id
+        description: The parent issue (an Epic in v1). Null for Epics and unparented issues.
+        data_tests:
+          - relationships:
+              arguments:
+                to: ref('dim_issue')
+                field: issue_id
+      - name: story_points
+        description: customfield_10016. Null for Epics.
+      - name: created_at
+        data_tests: [not_null]
+      - name: resolved_at
+        description: Resolution instant. Null while unresolved.
+      - name: duedate
+        description: Set when the issue first joins a sprint; null for Epics and never-scheduled issues.
