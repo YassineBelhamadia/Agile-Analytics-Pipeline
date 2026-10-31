@@ -157,7 +157,7 @@ Three sabotage runs, each a throwaway pytest plugin that breaks one mechanism, s
 
 ### Reconciliation with `raw_data/` (step 2.3)
 
-`tests/test_staging_reconciliation.py`, 8 tests.
+`tests/test_staging_reconciliation.py`, 10 tests (8 from step 2.3, 2 from step 3.4).
 
 **Independence.** The expected side is built from `raw_data/*.json` with plain `json` and `datetime`. It imports nothing from `mock_api/` (no serializer, no ID hashing) and calls no `ingestion.parse` helper, and a test checks that. The staging side is read from Postgres after a normal load.
 
@@ -175,7 +175,7 @@ Staging is read with left joins, so a dangling ID shows up as a mismatch. Rows a
 | `teams` | project key, name | `base_headcount`: no API counterpart |
 | `users` | display name | account ID (a hash of the raw ID); team: not exposed by the API |
 | `boards` | one per team, by project key | `raw_data/` has no boards |
-| `sprints` | team, name, state, start and end instant (the date at 09:00 UTC) | `complete_at`: no raw counterpart |
+| `sprints` | team, name, state, start and end instant (the date at 09:00 UTC), `complete_at` (from step 3.4: the end instant when closed, else null; derived, see [D-032](../decisions.md#d-032-sprint-complete_at-is-reconciled-against-a-derived-value)) | none |
 | `capacity` | team, sprint, headcount, `pto_days` (exact float) | none |
 | `issues` | key, team, type, status, story points, due date, created, resolution date, parent, assignee, reporter | `summary`: synthetic in the mock, absent from `raw_data/` |
 | `status_transitions` | issue, timestamp, from and to status, author | transition ID (a hash) |
@@ -200,6 +200,7 @@ Staging is read with left joins, so a dangling ID shows up as a mismatch. Rows a
 | `test_timestamp_rule_is_truncation_to_milliseconds` | The rule above, with its counts. |
 | `test_sabotage_1_broken_timestamp_parsing_fails_the_reconciliation` (2 cases) | **Sabotage 1.** `+00:00` misread as +01:00 fails exactly `sprints`. `+0000` misread fails exactly `issues`, `status_transitions` and `sprint_memberships`. After `monkeypatch.undo()`, the reload reconciles cleanly. |
 | `test_sabotage_2_dropping_one_landed_page_fails_the_counts` | **Sabotage 2.** Removing `changelogs/PHX-29/page-0000.json` and its manifest entry from a copy: the load succeeds, but the counts fail (1,488 → 1,484 transitions, 320 → 319 memberships). Reloading the full landing passes again. |
+| `test_sabotage_3_a_changed_sprint_complete_at_or_state_fails_the_reconciliation` (2 cases) | **Sabotage 3** (step 3.4). Moving one sprint's `complete_at` by 1 ms, or setting its state to `active`, fails exactly `sprints` (one row missing, one extra). A reload reconciles cleanly. |
 | `test_reconciliation_is_independent_of_the_api_and_the_parser` | No `mock_api` import. The expected side calls neither `parse.` nor `loader.`. |
 
 Two more throwaway sabotage runs each fail the row-by-row test with an `issues` mismatch: one swaps an issue's assignee and reporter, the other adds 1 to one issue's story points.

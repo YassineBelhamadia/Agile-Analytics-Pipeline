@@ -5,6 +5,10 @@ models:
     description: >
       One row per status change, the star schema's central grain. Keys to all
       four dimensions: issue, team, author (user) and event sprint.
+    data_tests:
+      - expected_row_count:
+          arguments:
+            expected: 1488
     columns:
       - name: changelog_id
         description: Jira changelog history ID. Primary key.
@@ -63,6 +67,9 @@ models:
   - name: fct_sprint_membership
     description: One row per issue joining a sprint, with when it joined.
     data_tests:
+      - expected_row_count:
+          arguments:
+            expected: 320
       - unique_combination:
           arguments:
             columns: [issue_id, sprint_id]
@@ -90,6 +97,9 @@ models:
   - name: fct_capacity
     description: One row per team and sprint, from /capacity (our own schema, not Jira's).
     data_tests:
+      - expected_row_count:
+          arguments:
+            expected: 36
       - unique_combination:
           arguments:
             columns: [team_id, sprint_id]

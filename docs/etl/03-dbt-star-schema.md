@@ -1,12 +1,14 @@
 # 03. dbt star schema
 
-Status: in progress (Session 3). Done so far:
+Status: done (Session 3, [`../etl-plan.md`](../etl-plan.md)).
 
 - **Step 3.1:** the dbt project, the profile, the staging sources and the 8 `stg_` views.
 - **Step 3.2:** the four dimensions in `marts`, with unique, not null, accepted-value and relationship tests.
 - **Step 3.3:** the three facts, with relationship, accepted-value, composite-grain and window tests.
-
-Remaining: data quality tests and the final docs (3.4). The plan is in [`../etl-plan.md`](../etl-plan.md).
+- **Step 3.4:**
+  - row-count, story point and one-team-per-user tests;
+  - the sprint `complete_at` and state reconciliation with `raw_data/`;
+  - this page's diagram, grain table, test list and limits.
 
 ## Purpose
 
@@ -18,7 +20,7 @@ The layers:
 |---|---|---|---|
 | Sources | `staging` | tables, loaded by `ingestion.load_staging` | not built by dbt, only declared |
 | `stg_` models | `stg` | views, one per staging table | rename to one naming convention, nothing else |
-| Dimensions and facts | `marts` | tables | the star schema (from step 3.2) |
+| Dimensions and facts | `marts` | tables | the star schema |
 
 ## Inputs and outputs
 
@@ -30,10 +32,101 @@ The layers:
 **Outputs**
 
 - Schema `stg`: 8 views, replaced by every `dbt build` or `dbt run`. They read staging live, so they show the current rows right after a reload with no dbt run.
-- Schema `marts`: tables (from step 3.2).
+- Schema `marts`: 4 dimension and 3 fact tables, replaced by every `dbt build` or `dbt run`.
 - `dbt/target/` (compiled SQL, `manifest.json`, run results) and `dbt/logs/`, both gitignored.
 
 ## Schema or contract
+
+**The star schema in `marts`.** Each line is a key that a `relationships` test checks. Every key is a natural Jira key ([D-028](../decisions.md#d-028-star-schema-with-natural-keys-and-no-date-dimension)).
+
+```mermaid
+erDiagram
+  dim_team ||--o{ dim_user : "team_id (derived)"
+  dim_team ||--o{ dim_sprint : team_id
+  dim_team ||--o{ dim_issue : team_id
+  dim_user ||--o{ dim_issue : "assignee / reporter"
+  dim_issue ||--o{ dim_issue : parent_issue_id
+  dim_issue ||--o{ fct_status_transitions : issue_id
+  dim_team ||--o{ fct_status_transitions : team_id
+  dim_user ||--o{ fct_status_transitions : author_user_id
+  dim_sprint ||--o{ fct_status_transitions : event_sprint_id
+  dim_issue ||--o{ fct_sprint_membership : issue_id
+  dim_sprint ||--o{ fct_sprint_membership : sprint_id
+  dim_team ||--o{ fct_capacity : team_id
+  dim_sprint ||--o{ fct_capacity : sprint_id
+
+  dim_team {
+    bigint team_id PK
+    text team_key UK
+    text team_name
+  }
+  dim_user {
+    text user_id PK
+    text display_name
+    bigint team_id FK
+  }
+  dim_sprint {
+    bigint sprint_id PK
+    bigint team_id FK
+    bigint board_id
+    text sprint_name
+    text sprint_state
+    timestamptz start_at
+    timestamptz end_at
+    timestamptz complete_at
+  }
+  dim_issue {
+    bigint issue_id PK
+    text issue_key UK
+    text issue_type
+    bigint team_id FK
+    text current_status_name
+    text assignee_user_id FK
+    text reporter_user_id FK
+    bigint parent_issue_id FK
+    numeric story_points
+    timestamptz created_at
+    timestamptz resolved_at
+    date duedate
+  }
+  fct_status_transitions {
+    bigint changelog_id PK
+    bigint issue_id FK
+    bigint team_id FK
+    text author_user_id FK
+    bigint event_sprint_id FK
+    timestamptz transitioned_at
+    text from_status_name
+    text to_status_name
+  }
+  fct_sprint_membership {
+    bigint issue_id PK
+    bigint sprint_id PK
+    timestamptz added_at
+    bigint changelog_id UK
+  }
+  fct_capacity {
+    bigint team_id PK
+    bigint sprint_id PK
+    text team_key
+    int headcount
+    float pto_days
+  }
+```
+
+The diagram leaves out `current_status_id`, `summary` and the status IDs on the transition fact. The tables below list every column.
+
+**Grain of each table**
+
+| Table | Kind | One row per | Key | Rows (SEED=22) |
+|---|---|---|---|---|
+| `dim_team` | dimension | team (Jira project) | `team_id` | 3 |
+| `dim_user` | dimension | Jira account | `user_id` | 12 |
+| `dim_sprint` | dimension | sprint | `sprint_id` | 36 |
+| `dim_issue` | dimension | issue, at its current status | `issue_id` | 530 |
+| `fct_status_transitions` | fact | status change | `changelog_id` | 1,488 |
+| `fct_sprint_membership` | fact | issue joining a sprint | (`issue_id`, `sprint_id`) | 320 |
+| `fct_capacity` | fact | team and sprint | (`team_id`, `sprint_id`) | 36 |
 
 **Schema names** ([D-027](../decisions.md#d-027-two-dbt-layers-with-exact-schema-names-stg-views-and-marts-tables)). dbt's built-in `generate_schema_name` would return `<profile schema>_<custom schema>`, for example `marts_stg`. `dbt/macros/generate_schema_name.sql` returns the custom schema as is. So `+schema: stg` (set for `models/staging/` in `dbt_project.yml`) builds into `stg`. A node with no custom schema falls back to the profile's `marts`.
 
@@ -70,19 +163,6 @@ With `{staging_schema: staging_test, schema_suffix: _test}`, dbt reads `staging_
 - **Boards** are not a dimension. In v1 each team has one board, and the board only links a sprint to its team, so `dim_sprint` carries `board_id` and the board's `team_id`.
 - **Status on `dim_issue`** is the current status, renamed `current_status_*` so it is not confused with the transition history (step 3.3).
 
-**Tests on the dimensions** (`dbt/models/marts/_marts__dimensions.yml`), 31 in all:
-
-- **`unique` and `not_null`:** every primary key, plus `team_key` and `issue_key`.
-- **`not_null`:** names, `issue_type`, `created_at`, `current_status_name`, `dim_sprint.board_id`, and both derived `team_id`s (user and sprint).
-- **`relationships`:**
-  - `team_id` on the user, sprint and issue dimensions → `dim_team`;
-  - `assignee_user_id` and `reporter_user_id` → `dim_user`;
-  - `parent_issue_id` → `dim_issue`.
-- **`accepted_values`:**
-  - `issue_type`: Epic, Story, Task, Bug;
-  - `current_status_name`: the five fixed statuses;
-  - `sprint_state`: future, active, closed.
-
 Generic tests take their arguments under `arguments:`, the dbt 1.10+ form, so dbt raises no deprecation warning.
 
 **Facts** (schema `marts`, tables).
@@ -118,23 +198,6 @@ The 216, cut other ways:
 
 This is the "no carryover" v1 limitation ([`../domain-model.md`](../domain-model.md), "Known v1 limitations"): an unfinished issue stays a member of its original sprint while its work continues in the next one. Nothing in the breakdown was unexpected.
 
-**Tests on the facts** (`dbt/models/marts/_marts__facts.yml`, `dbt/tests/`), 34 in all:
-
-- **`unique` and `not_null`:** `changelog_id` on both changelog facts.
-- **`unique_combination`** ([D-031](../decisions.md#d-031-no-dbt-packages-in-v1), `dbt/tests/generic/unique_combination.sql`): (`issue_id`, `sprint_id`) and (`team_id`, `sprint_id`).
-- **`not_null` and `relationships`:** every foreign key:
-  - issue → `dim_issue`;
-  - team → `dim_team`;
-  - author → `dim_user`;
-  - `event_sprint_id` and `sprint_id` → `dim_sprint`.
-- **`not_null`:** `transitioned_at`, `added_at`, `team_key`, `headcount`, `pto_days`.
-- **`accepted_values`:** `from_status_name` and `to_status_name`, the five fixed statuses.
-- **Singular tests** (they return the offending rows):
-  - `assert_each_transition_in_exactly_one_sprint_window`: 0 windows is a gap, 2 is overlapping sprints.
-  - `assert_transitions_join_every_dimension_once`: the inner join to all four dimensions has as many rows as the fact.
-  - `assert_fact_teams_match_their_sprint`: a membership's issue and sprint share a team, and so do a capacity row and its sprint.
-- **`author_user_id` is `not_null`** although Jira allows a null author (automation). The shipped data has none, and a null would drop the row from the inner join to `dim_user`.
-
 ## How to run
 
 From the repo root, with Postgres up and staging loaded ([02-staging.md](02-staging.md#how-to-run)):
@@ -152,7 +215,45 @@ After `ingestion.load_staging`, no dbt run is needed for the `stg_` views: they 
 
 ## How it is verified
 
-`uv run --env-file .env python -m pytest tests/test_dbt.py -rs`: 15 tests, 0 skipped.
+### dbt tests
+
+`uv run --env-file .env dbt test --project-dir dbt --profiles-dir dbt`: 74 tests. `dbt build` runs them too, each one after the model it checks. The generic tests are in `dbt/models/marts/_marts__dimensions.yml` and `_marts__facts.yml`. The singular tests and the two generic test macros are in `dbt/tests/`.
+
+| Kind | Count | What is tested |
+|---|---|---|
+| `unique` | 8 | every single-column key: `team_id`, `team_key`, `user_id`, `sprint_id`, `issue_id`, `issue_key`, and `changelog_id` on both changelog facts |
+| `unique_combination` (own generic, [D-031](../decisions.md#d-031-no-dbt-packages-in-v1)) | 2 | (`issue_id`, `sprint_id`) on `fct_sprint_membership`, (`team_id`, `sprint_id`) on `fct_capacity` |
+| `not_null` | 33 | every key and foreign key, the names, `issue_type`, `current_status_name`, every timestamp a metric needs, `headcount`, `pto_days`, and both derived team IDs (user and sprint) |
+| `relationships` | 14 | every line in the diagram (assignee / reporter is two) |
+| `accepted_values` | 5 | `issue_type` (Epic, Story, Task, Bug); `sprint_state` (future, active, closed); `current_status_name`, `from_status_name` and `to_status_name` (the five fixed statuses) |
+| `expected_row_count` (own generic) | 7 | each `marts` table has its shipped count: 3, 12, 36, 530, 1,488, 320, 36 |
+| singular | 5 | see below |
+
+Singular tests return the offending rows, so a failure shows what is wrong:
+
+- **`assert_each_transition_in_exactly_one_sprint_window`.** Every transition matches exactly one window of its team. 0 means a gap, 2 means overlapping sprints.
+- **`assert_transitions_join_every_dimension_once`.** The inner join of the transition fact to all four dimensions has as many rows as the fact.
+- **`assert_fact_teams_match_their_sprint`.** A membership's issue and sprint share a team, and so do a capacity row and its sprint.
+- **`assert_story_points_null_exactly_for_epics`.** Every non-Epic issue has story points, and no Epic has any ([D-010](../decisions.md#d-010-bugs-carry-story-points-and-count-toward-velocity)).
+- **`assert_each_user_assigned_issues_in_one_team`.** Every user is assigned issues in exactly one team, and a failure lists the teams found. It reads the `stg` layer, independently of how `dim_user` derives the team ([D-029](../decisions.md#d-029-a-users-team-is-derived-from-the-issues-assigned-to-them)).
+
+Two choices in the tests:
+
+- `author_user_id` is `not_null`, although Jira allows a null author (automation). The shipped data has none, and a null would drop the row from the inner join to `dim_user`.
+- The count targets are the SEED=22 shipped dataset's. A new seed means new targets, here and in CLAUDE.md.
+
+### Sprint `complete_at` and state against `raw_data/`
+
+This check was carried over from Session 2. It lives in `tests/test_staging_reconciliation.py`, the independent reconciliation ([02-staging.md](02-staging.md#reconciliation-with-raw_data-step-23)), not in dbt, because the expected side is read from `raw_data/*.json`.
+
+- **No raw counterpart.** `raw_data/sprints.json` has no completion field: only `state`, `start_date` and `end_date`. The mock API's rule (`mock_api/serializers.py`, `_sprint_dates`) is that a closed sprint was completed at its scheduled end. The test restates that rule rather than importing it.
+- **Expected value:** `end_date` at 09:00 UTC when `state` is `closed`, otherwise null. It is compared exactly, as part of the sprint row (team, name, state, start, end, complete).
+- **State.** The sprint's state (closed, active, future) is compared in the same row. All 36 are closed in the shipped data.
+- **Sabotage 3:** moving one sprint's `complete_at` by 1 ms, or setting its state to `active`, fails exactly the `sprints` table on that one sprint. A reload passes again.
+
+### pytest
+
+`uv run --env-file .env python -m pytest tests/test_dbt.py -rs`: 18 tests, 0 skipped.
 
 - **Isolation.** The Postgres tests load staging into `staging_test` and run dbt with the test vars, so dbt builds `stg_test` (and later `marts_test`). All three schemas are dropped before and after, and `staging`, `stg` and `marts` are never touched. dbt's target and log files go to a temporary directory.
 - **No `.env`.** dbt runs from that temporary directory, so it finds no `.env` and depends on the process environment alone.
@@ -163,18 +264,21 @@ After `ingestion.load_staging`, no dbt run is needed for the `stg_` views: they 
 | `test_profile_takes_every_connection_value_from_the_environment` | host, port, user, password and dbname in `dbt/profiles.yml` are all `env_var('POSTGRES_*')`. |
 | `test_dbt_debug_connects_with_the_environment` | `dbt debug` passes ("All checks passed!"). |
 | `test_sabotage_a_wrong_credential_fails_dbt_debug_clearly` | **Sabotage:** a wrong `POSTGRES_PASSWORD` fails `dbt debug` with `password authentication failed`. Removing `POSTGRES_HOST` fails it with `Env var required but not provided: 'POSTGRES_HOST'`. |
-| `test_stg_views_build_count_and_survive_a_staging_reload` | `dbt build --select staging` creates exactly the 8 views, with the shipped counts. After a normal `load_staging`, the views are the same objects (same oids) with the same counts. |
+| `test_stg_views_build_count_and_survive_a_staging_reload` | `dbt run --select staging` creates exactly the 8 views, with the shipped counts. After a normal `load_staging`, the views are the same objects (same oids) with the same counts. |
 | `test_dbt_never_writes_outside_the_test_schemas` | With the test vars, every `staging/` model is in `stg_test`, every `marts/` model in `marts_test`, and the source in `staging_test`. |
 | `test_dimensions_build_with_the_shipped_counts_and_pass_their_tests` | A full `dbt build` passes with no failed test. The dimensions are tables with 3, 12, 36 and 530 rows. |
 | `test_derived_user_teams_equal_raw_data` | Each user's derived team is their team in `raw_data/users.json`, matched by display name and team key. |
-| `test_sabotage_a_deleted_staging_user_fails_the_user_relationships` | **Sabotage:** deleting "Phoenix Dev 1" from staging fails exactly the tests pointing at `dim_user`: issue assignee and reporter, transition author, and the join to every dimension. After a reload, the build passes. |
-| `test_sabotage_a_duplicated_staging_user_fails_unique` | **Sabotage:** staging's primary key refuses a duplicate user (`UniqueViolation`). With the key dropped, a duplicated row fails exactly `unique_dim_user_user_id` and the join test (that user's transitions double). |
-| `test_sabotage_a_user_in_two_teams_fails_the_team_mapping` | **Sabotage:** moving one PHX issue to ATL gives its assignee two teams. Exactly two tests fail: `not_null_dim_user_team_id`, and `assert_fact_teams_match_their_sprint`, since the issue's PHX sprint membership now crosses teams. |
+| `test_sabotage_a_deleted_staging_user_fails_the_user_relationships` | **Sabotage:** deleting "Phoenix Dev 1" from staging fails exactly the tests pointing at `dim_user`: issue assignee and reporter, transition author, the join to every dimension, and `dim_user`'s row count. After a reload, the build passes. |
+| `test_sabotage_a_duplicated_staging_user_fails_unique` | **Sabotage:** staging's primary key refuses a duplicate user (`UniqueViolation`). With the key dropped, a duplicated row fails exactly three tests: `unique_dim_user_user_id`, the join test (that user's transitions double) and `dim_user`'s row count. |
+| `test_sabotage_a_user_in_two_teams_fails_the_team_mapping` | **Sabotage:** moving one PHX issue to ATL gives its assignee two teams. Exactly three tests fail: `not_null_dim_user_team_id`, `assert_each_user_assigned_issues_in_one_team`, and `assert_fact_teams_match_their_sprint`, since the issue's PHX sprint membership now crosses teams. |
 | `test_facts_build_with_the_shipped_counts_and_join_all_four_dimensions` | The facts have 1,488, 320 and 36 rows. The inner join to all four dimensions gives 1,488 rows and 1,488 distinct IDs. |
 | `test_event_sprint_is_the_window_that_contains_the_transition` | `event_sprint_id` differs from the membership sprint on exactly 216 transitions, and for every one of them both the transition and its event sprint come after the membership sprint ended. |
 | `test_a_transition_on_a_sprint_boundary_belongs_to_the_later_sprint` | A transition moved to exactly PHX Sprint 6's `start_at` (= Sprint 5's `end_at`) gets Sprint 6, and every test passes. |
-| `test_sabotage_an_orphan_transition_fails_the_issue_relationship` | **Sabotage:** a transition with issue ID 999999999 fails the `issue_id` relationship test. So do the checks that need its issue: `not_null` on `team_id` and `event_sprint_id`, the window test and the join test. Five in all, nothing else. |
-| `test_sabotage_overlapping_sprints_fail_the_window_test` | **Sabotage:** PHX Sprint 5 ending a day late overlaps Sprint 6. Exactly the window test and `unique` on `changelog_id` fail, since the overlapping day's transitions match two sprints. |
+| `test_sabotage_an_orphan_transition_fails_the_issue_relationship` | **Sabotage:** a transition with issue ID 999999999 fails the `issue_id` relationship test. So do the checks that need its issue: `not_null` on `team_id` and `event_sprint_id`, the window test, the join test and the fact's row count. Six in all, nothing else. |
+| `test_sabotage_overlapping_sprints_fail_the_window_test` | **Sabotage:** PHX Sprint 5 ending a day late overlaps Sprint 6. Exactly three tests fail: the window test, `unique` on `changelog_id` and the fact's row count, since the overlapping day's transitions match two sprints. |
+| `test_sabotage_a_null_key_fails_not_null` | **Sabotage, null key:** staging refuses a null `changelog_id` (`NotNullViolation`). With its primary key and not null constraint dropped, one null key fails exactly `not_null_fct_status_transitions_changelog_id`. |
+| `test_sabotage_a_duplicate_key_fails_unique_and_the_row_count` | **Sabotage, duplicate key:** with staging's primary key dropped, one transition copied in full fails exactly three tests: `unique_fct_status_transitions_changelog_id`, `expected_row_count_fct_status_transitions_1488` (1,489 rows) and the window test (that `changelog_id` counts two windows). |
+| `test_sabotage_an_epic_with_story_points_fails_the_story_point_test` | **Sabotage:** giving one Epic 3 story points fails exactly `assert_story_points_null_exactly_for_epics`. |
 
 **Gate run for step 3.1**, on the real schemas, through the documented commands:
 
@@ -209,10 +313,35 @@ After `ingestion.load_staging`, no dbt run is needed for the `stg_` views: they 
   - `dbt run` then `dbt test` gives `ERROR=5`: `relationships_fct_status_transitions_issue_id__issue_id__ref_dim_issue_`, `not_null_fct_status_transitions_team_id`, `not_null_fct_status_transitions_event_sprint_id`, `assert_each_transition_in_exactly_one_sprint_window` and `assert_transitions_join_every_dimension_once`, each with 1 row.
 - **Restore:** `load_staging`, then `dbt build`: `PASS=80`.
 
+The 3.2 and 3.3 gate runs above list the failures as they were at the time. Since step 3.4, the same sabotage also fails the row-count test or the one-team test where the table above says so.
+
+**Gate run for step 3.4:**
+
+- **dbt, on the real schemas:**
+  - `dbt build` gives `PASS=89 WARN=0 ERROR=0` (8 views, 7 tables, 74 tests).
+  - `dbt test` in full gives `PASS=74 WARN=0 ERROR=0`.
+- **Sabotage, each failing the right test** (pytest, on the test schemas):
+  - null key → `not_null_fct_status_transitions_changelog_id` only;
+  - duplicate key → `unique_fct_status_transitions_changelog_id`, the row count (1,489) and the window test;
+  - changed `complete_at` → the reconciliation's `sprints` table only;
+  - also a changed state, an Epic with story points, and the earlier cases.
+- **`complete_at` on the real `staging`:**
+  - The reconciliation, run read-only, finds no difference in any table, sprint `complete_at` and state included.
+  - Moving NMD Sprint 3's `complete_at` by 1 ms gives a mismatch in `sprints` only: the expected row is missing and the changed one is extra.
+  - After `load_staging`, there are no differences again.
+- **Full suite and hooks:** see the session report. `pytest -rs` passes with 0 skipped, and `sh scripts/test_hooks.sh` gives 28 passed, 0 failed.
+
 ## Known limits
 
 - **Global schema names.** `stg` and `marts` have no per-developer or per-target prefix, so two people sharing a database would overwrite each other's models ([D-027](../decisions.md#d-027-two-dbt-layers-with-exact-schema-names-stg-views-and-marts-tables)).
 - **dbt reads `.env` on its own** from the working directory. A missing variable can be filled from a file the command doesn't name ([D-026](../decisions.md#d-026-dbt-core-112-with-dbt-postgres-111-in-dbt-profile-from-the-environment)).
+- **`complete_at` is derived, and no metric uses it.** `raw_data/` has no completion instant, so a closed sprint's `complete_at` is its scheduled end, by the mock API's rule. Its reconciliation only shows that staging follows that rule. Sprint metrics use `end_at` (the sprint's `end_date` at 09:00 UTC), never `complete_at` ([D-032](../decisions.md#d-032-sprint-complete_at-is-reconciled-against-a-derived-value)).
+- **`event_sprint_id` needs contiguous sprints.** A transition before the first sprint, after the last one, or in a gap gets no sprint. It fails `not_null` and the window test rather than being dropped. The shipped data has none ([D-030](../decisions.md#d-030-a-transitions-sprint-is-the-window-it-happened-in-event_sprint_id)).
+- **One team per user, one board per team.** Both are v1 assumptions. Each is checked by a test, not modeled ([D-029](../decisions.md#d-029-a-users-team-is-derived-from-the-issues-assigned-to-them)).
+- **Automation authors.** A transition with no author fails `not_null`. Real Jira can have them, so supporting them would mean an "automation" user or left joins in the reports.
+- **Row-count targets are dataset-specific.** `expected_row_count` holds the SEED=22 counts.
+- **No date dimension.** Power BI will need a date table for calendar slicing ([D-028](../decisions.md#d-028-star-schema-with-natural-keys-and-no-date-dimension)).
+- **`dbt build` stops at a failing test.** Everything downstream of it is skipped. That is the right behavior for the pipeline, but one run shows only the first layer of failures. For a full picture, run `dbt run`, then `dbt test`.
 - **A staging schema change needs the views rebuilt.** `load_staging --rebuild` refuses while the `stg_` views depend on staging ([D-022](../decisions.md#d-022-staging-reloads-by-truncate-and-copy-drop-and-recreate-only-on---rebuild)). Drop the `stg` schema first, rebuild, then `dbt build`.
 
 ## Options rejected and why
@@ -221,3 +350,6 @@ After `ingestion.load_staging`, no dbt run is needed for the `stg_` views: they 
 - **dbt's default schema concatenation, `stg_` as tables, tests on the real schemas or a second database:** [D-027](../decisions.md#d-027-two-dbt-layers-with-exact-schema-names-stg-views-and-marts-tables).
 - **Surrogate keys and a date dimension:** [D-028](../decisions.md#d-028-star-schema-with-natural-keys-and-no-date-dimension).
 - **A hand-written user-to-team mapping, or picking the most frequent team:** [D-029](../decisions.md#d-029-a-users-team-is-derived-from-the-issues-assigned-to-them).
+- **The membership sprint on transitions, or a closed window:** [D-030](../decisions.md#d-030-a-transitions-sprint-is-the-window-it-happened-in-event_sprint_id).
+- **dbt_utils, or `unique` on a concatenated expression:** [D-031](../decisions.md#d-031-no-dbt-packages-in-v1).
+- **Leaving `complete_at` unchecked, or checking it in dbt:** [D-032](../decisions.md#d-032-sprint-complete_at-is-reconciled-against-a-derived-value).

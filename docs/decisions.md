@@ -514,3 +514,27 @@ The narrative record of the early project decisions, with the full argument for 
     - the transition fact joining every dimension once;
     - facts and their sprints sharing a team.
 - **Source:** `dbt/tests/`.
+
+## D-032: Sprint `complete_at` is reconciled against a derived value
+
+- **Date:** 2026-10-31
+- **Decision:**
+  - `tests/test_staging_reconciliation.py` compares `staging.sprints.complete_at` with `end_date` at 09:00 UTC for closed sprints, and with null otherwise.
+  - It also compares each sprint's state.
+  - `complete_at` is documented as derived and unused by any metric.
+- **Context:**
+  - Session 2 left `complete_at` unreconciled, because `raw_data/sprints.json` has no completion field.
+  - The mock API sets `completeDate` = `endDate` for closed sprints (`mock_api/serializers.py`, `_sprint_dates`).
+  - Step 3.4 asked for the check. The gap was found at step 3.1, and Yassine accepted the derived rule at the 3.2 review, adding the state comparison.
+- **Options considered:**
+  - leave `complete_at` unchecked;
+  - check it in dbt (dbt can't read `raw_data/*.json` without loading it as a seed);
+  - compare it, in the existing independent reconciliation, with the rule restated from the contract (chosen).
+- **Why:**
+  - It catches a parsing or loading error in `complete_at`, for example a shifted `+00:00` offset or a wrong column, with the same rule as the other timestamps ([D-024](#d-024-reconciliation-truncates-raw-timestamps-to-milliseconds)).
+  - It does not import the serializer, so the check stays independent.
+- **Consequences:**
+  - The check can't detect a wrong completion instant in the ground truth, because none exists.
+  - Metrics use `end_at`, never `complete_at`, so the derivation affects no reported figure.
+  - If a later simulator records real completion times, this rule must change.
+- **Source:** `tests/test_staging_reconciliation.py` (`sprint_complete_at`, `test_sabotage_3_...`); [`etl/03-dbt-star-schema.md`](etl/03-dbt-star-schema.md).

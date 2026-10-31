@@ -11,6 +11,13 @@ staging holds Jira IDs and raw_data/ holds the simulator's internal ones:
 - issue: issue key;
 - sprint: team key + sprint name (unique in raw_data/).
 
+Sprint complete_at (added in step 3.4). raw_data/sprints.json has no
+completion field: the ground truth holds only a state and two dates. The
+contract's rule, restated here rather than imported, is that a closed sprint
+was completed at its scheduled end, so the expected value is end_date at
+09:00 UTC when state is "closed" and null otherwise. complete_at is therefore
+a derived value; no metric uses it (sprint metrics use end_at).
+
 Timestamp rule. raw_data/ timestamps are naive UTC with microseconds. The
 API truncates them to milliseconds (floor, never rounding) and labels them
 UTC. So every raw timestamp is read as UTC and truncated to milliseconds,
@@ -68,6 +75,11 @@ def sprint_instant(day: str) -> datetime:
     return datetime.combine(date.fromisoformat(day), SPRINT_BOUNDARY, tzinfo=UTC)
 
 
+def sprint_complete_at(sprint: dict) -> datetime | None:
+    """No raw counterpart exists: a closed sprint counts as completed at its scheduled end (module docstring)."""
+    return sprint_instant(sprint["end_date"]) if sprint["state"] == "closed" else None
+
+
 def expected_rows(rule=truncate_ms) -> dict[str, list[tuple]]:
     """Every comparable staging row, built from raw_data/ alone, keyed by natural keys."""
     teams = {t["team_id"]: t for t in raw("teams")}
@@ -82,7 +94,10 @@ def expected_rows(rule=truncate_ms) -> dict[str, list[tuple]]:
         "users": [(name,) for name in users.values()],
         "boards": [(t["key"],) for t in teams.values()],  # no boards in raw_data/; the mock serves one per team
         "sprints": [
-            (*sprint_ref(s["sprint_id"]), s["state"], sprint_instant(s["start_date"]), sprint_instant(s["end_date"]))
+            (
+                *sprint_ref(s["sprint_id"]), s["state"],
+                sprint_instant(s["start_date"]), sprint_instant(s["end_date"]), sprint_complete_at(s),
+            )
             for s in sprints.values()
         ],
         "capacity": [
@@ -115,7 +130,7 @@ STAGING_QUERIES = {
     "teams": "select project_key, project_name from {s}.teams",
     "users": "select display_name from {s}.users",
     "boards": "select project_key from {s}.boards",
-    "sprints": """select b.project_key, s.sprint_name, s.state, s.start_at, s.end_at
+    "sprints": """select b.project_key, s.sprint_name, s.state, s.start_at, s.end_at, s.complete_at
                   from {s}.sprints s left join {s}.boards b using (board_id)""",
     "capacity": """select c.team_key, b.project_key, s.sprint_name, c.headcount, c.pto_days
                    from {s}.capacity c left join {s}.sprints s using (sprint_id) left join {s}.boards b on b.board_id = s.board_id""",
@@ -142,7 +157,7 @@ COMPARED = {
     "teams": "project key, name (base_headcount has no API counterpart)",
     "users": "display name (account IDs are hashes of the raw IDs; their team has no API counterpart)",
     "boards": "one per team, by project key (raw_data/ has no boards)",
-    "sprints": "team, name, state, start and end instants (complete_at has no raw counterpart)",
+    "sprints": "team, name, state, start, end and complete instants (complete_at derived: closed means end_date 09:00 UTC)",
     "capacity": "team, sprint, headcount, pto_days exactly",
     "issues": "key, team, type, status, story points, due date, created, resolution date, parent, assignee, reporter "
               "(summary is synthetic in the mock and absent from raw_data/)",
@@ -294,6 +309,28 @@ def test_sabotage_2_dropping_one_landed_page_fails_the_counts(conn, landing: Pat
 
     loader.load_staging(conn, landing, schema=TEST_SCHEMA)  # revert: the full landing passes again
     assert count_differences(conn, TEST_SCHEMA) == {}
+
+
+SPRINT_CHANGES = {
+    "complete_at moved by 1 ms": "update {s}.sprints set complete_at = complete_at + interval '1 millisecond'",
+    "state changed": "update {s}.sprints set state = 'active'",
+}
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize("change", SPRINT_CHANGES.values(), ids=SPRINT_CHANGES.keys())
+def test_sabotage_3_a_changed_sprint_complete_at_or_state_fails_the_reconciliation(conn, landing: Path, change: str) -> None:
+    """Step 3.4. Change one sprint's complete_at or state in staging: exactly the sprints table fails, on that sprint."""
+    loader.load_staging(conn, landing, schema=TEST_SCHEMA)
+    sprint_id = conn.execute(f"select min(sprint_id) from {TEST_SCHEMA}.sprints").fetchone()[0]
+    conn.execute(change.format(s=TEST_SCHEMA) + " where sprint_id = %s", (sprint_id,))
+
+    failing = {table: found for table, found in reconcile(conn, TEST_SCHEMA).items() if found}
+    assert set(failing) == {"sprints"}
+    assert len(failing["sprints"]) == 2  # the expected row missing, the changed row extra
+
+    loader.load_staging(conn, landing, schema=TEST_SCHEMA)  # revert
+    assert reconcile(conn, TEST_SCHEMA) == {table: [] for table in STAGING_QUERIES}
 
 
 def test_reconciliation_is_independent_of_the_api_and_the_parser() -> None:

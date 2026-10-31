@@ -206,7 +206,7 @@ def test_derived_user_teams_equal_raw_data(warehouse, tmp_path: Path) -> None:
 @pytest.mark.postgres
 def test_sabotage_a_deleted_staging_user_fails_the_user_relationships(warehouse, landing: Path, tmp_path: Path) -> None:
     """Sabotage: delete one staging user. Exactly the tests that point at dim_user fail: the issue's assignee and
-    reporter, the transition's author, and the transition join to every dimension."""
+    reporter, the transition's author, the transition join to every dimension, and dim_user's row count."""
     user = "Phoenix Dev 1"
     reported = warehouse.execute(
         sql.SQL("select count(*) from {} i join {} u on u.account_id = i.reporter_account_id where u.display_name = %s").format(
@@ -221,6 +221,7 @@ def test_sabotage_a_deleted_staging_user_fails_the_user_relationships(warehouse,
         "relationships_dim_issue_assignee_user_id__user_id__ref_dim_user_",
         "relationships_fct_status_transitions_author_user_id__user_id__ref_dim_user_",
         "assert_transitions_join_every_dimension_once",
+        "expected_row_count_dim_user_12",
     }
     if reported:
         expected.add("relationships_dim_issue_reporter_user_id__user_id__ref_dim_user_")
@@ -241,7 +242,9 @@ def test_sabotage_a_duplicated_staging_user_fails_unique(warehouse, tmp_path: Pa
 
     warehouse.execute(sql.SQL("alter table {} drop constraint users_pkey").format(users))
     warehouse.execute(duplicate)
-    assert run_then_test(tmp_path) == {"unique_dim_user_user_id", "assert_transitions_join_every_dimension_once"}
+    assert run_then_test(tmp_path) == {
+        "unique_dim_user_user_id", "assert_transitions_join_every_dimension_once", "expected_row_count_dim_user_12",
+    }
 
 
 @pytest.mark.postgres
@@ -255,7 +258,9 @@ def test_sabotage_a_user_in_two_teams_fails_the_team_mapping(warehouse, tmp_path
             "where issue_key = (select min(issue_key) from {} where issue_key like 'PHX-%%' and issue_type <> 'Epic')"
         ).format(issues, teams, issues)
     )
-    assert run_then_test(tmp_path) == {"not_null_dim_user_team_id", "assert_fact_teams_match_their_sprint"}
+    assert run_then_test(tmp_path) == {
+        "not_null_dim_user_team_id", "assert_fact_teams_match_their_sprint", "assert_each_user_assigned_issues_in_one_team",
+    }
 
 
 # --- Facts -----------------------------------------------------------------------
@@ -342,6 +347,7 @@ def test_sabotage_an_orphan_transition_fails_the_issue_relationship(warehouse, t
         "not_null_fct_status_transitions_event_sprint_id",
         "assert_each_transition_in_exactly_one_sprint_window",
         "assert_transitions_join_every_dimension_once",
+        "expected_row_count_fct_status_transitions_1488",
     }
 
 
@@ -357,4 +363,46 @@ def test_sabotage_overlapping_sprints_fail_the_window_test(warehouse, tmp_path: 
     assert run_then_test(tmp_path) == {
         "assert_each_transition_in_exactly_one_sprint_window",
         "unique_fct_status_transitions_changelog_id",
+        "expected_row_count_fct_status_transitions_1488",
     }
+
+
+# --- Data quality (step 3.4) ---------------------------------------------------------
+
+
+@pytest.mark.postgres
+def test_sabotage_a_null_key_fails_not_null(warehouse, tmp_path: Path) -> None:
+    """Sabotage: staging refuses a null changelog_id. With its primary key and not null constraint dropped, one
+    transition gets a null key, and only not_null on the fact fails."""
+    transitions = staging("status_transitions")
+    null_key = sql.SQL("update {t} set changelog_id = null where changelog_id = (select min(changelog_id) from {t})")
+    with pytest.raises(psycopg.errors.NotNullViolation):
+        warehouse.execute(null_key.format(t=transitions))
+    warehouse.execute(sql.SQL("alter table {} drop constraint status_transitions_pkey").format(transitions))
+    warehouse.execute(sql.SQL("alter table {} alter column changelog_id drop not null").format(transitions))
+    warehouse.execute(null_key.format(t=transitions))
+    assert run_then_test(tmp_path) == {"not_null_fct_status_transitions_changelog_id"}
+
+
+@pytest.mark.postgres
+def test_sabotage_a_duplicate_key_fails_unique_and_the_row_count(warehouse, tmp_path: Path) -> None:
+    """Sabotage: with staging's primary key dropped, one transition appears twice. unique fails, the row count is
+    1,489, and the window test counts that changelog_id's window twice."""
+    transitions = staging("status_transitions")
+    warehouse.execute(sql.SQL("alter table {} drop constraint status_transitions_pkey").format(transitions))
+    warehouse.execute(sql.SQL("insert into {t} select * from {t} order by changelog_id limit 1").format(t=transitions))
+    assert run_then_test(tmp_path) == {
+        "unique_fct_status_transitions_changelog_id",
+        "expected_row_count_fct_status_transitions_1488",
+        "assert_each_transition_in_exactly_one_sprint_window",
+    }
+
+
+@pytest.mark.postgres
+def test_sabotage_an_epic_with_story_points_fails_the_story_point_test(warehouse, tmp_path: Path) -> None:
+    """Sabotage: give one Epic 3 story points. Only the Epic/non-Epic story point test fails."""
+    issues = staging("issues")
+    warehouse.execute(
+        sql.SQL("update {i} set story_points = 3 where issue_id = (select min(issue_id) from {i} where issue_type = 'Epic')").format(i=issues)
+    )
+    assert run_then_test(tmp_path) == {"assert_story_points_null_exactly_for_epics"}

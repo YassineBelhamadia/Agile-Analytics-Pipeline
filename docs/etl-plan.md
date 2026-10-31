@@ -18,7 +18,7 @@ Rules for this file:
 | 3.1 | 3 | `chore(dbt): initialize project with staging sources` | done |
 | 3.2 | 3 | `feat(dbt): add team, user, sprint and issue dimensions` | done |
 | 3.3 | 3 | `feat(dbt): add status transition fact and capacity model` | done |
-| 3.4 | 3 | `test(dbt): add relationship and data quality tests` | confirmed |
+| 3.4 | 3 | `test(dbt): add relationship and data quality tests` | done |
 | 4.1 | 4 | `feat(metrics): add sprint metrics reconciled with sprint_report` | provisional |
 | 4.2 | 4 | `feat(metrics): add business question models 1 to 3` | provisional |
 | 4.3 | 4 | `feat(metrics): add business question models 4 to 6` | provisional |
@@ -260,6 +260,9 @@ Adds dim_team, dim_user, dim_sprint and dim_issue as tables in the marts schema,
   - Counts are 1,488, 320 and 36.
   - Joining the transition fact to all four dimensions returns exactly 1,488 rows: no lost rows, no duplicates.
   - Sabotage: an orphan row (an issue ID that doesn't exist) makes the relationship test fail.
+- **Decided at the 3.2 review:**
+  - The transition's sprint is `event_sprint_id`: the sprint of the issue's team whose window contained the transition, half-open (`start_at <= transitioned_at < end_at`), with a test that every transition matches exactly one window ([D-030](decisions.md#d-030-a-transitions-sprint-is-the-window-it-happened-in-event_sprint_id)).
+  - Before building it, the 216 transitions where it differs from the membership sprint were broken down in [`etl/03-dbt-star-schema.md`](etl/03-dbt-star-schema.md). All are after the membership sprint ended.
 - **Commit message:**
 
 ```
@@ -273,7 +276,7 @@ Adds fct_status_transitions, fct_sprint_membership and fct_capacity with relatio
 - **Scope.**
   - Row-count tests, a non-Epic story point test and a one-team-per-user test.
   - A check that sprint `complete_at` matches `raw_data/`. It is carried over from Session 2: `complete_at` in `staging.sprints` must match `raw_data/sprints.json`, with the same independent approach and timestamp rule as the existing reconciliation ([D-024](decisions.md#d-024-reconciliation-truncates-raw-timestamps-to-milliseconds)).
-    - Found at step 3.1: `raw_data/sprints.json` has no completion field (`sprint_id`, `team_id`, `name`, `state`, `start_date`, `end_date` only). The mock API sets `completeDate` = `endDate` for closed sprints (`mock_api/serializers.py`, `_sprint_dates`). So the only raw counterpart is: closed means `end_date` at 09:00 UTC, otherwise null. To confirm at the 3.2 review.
+    - Found at step 3.1: `raw_data/sprints.json` has no completion field (`sprint_id`, `team_id`, `name`, `state`, `start_date`, `end_date` only). The mock API sets `completeDate` = `endDate` for closed sprints (`mock_api/serializers.py`, `_sprint_dates`). So the only raw counterpart is: closed means `end_date` at 09:00 UTC, otherwise null. Confirmed at the 3.2 review, with two additions: compare each sprint's state too, and document that `complete_at` is derived and used by no metric ([D-032](decisions.md#d-032-sprint-complete_at-is-reconciled-against-a-derived-value)).
   - Finalise [`etl/03-dbt-star-schema.md`](etl/03-dbt-star-schema.md): a Mermaid schema diagram, the grain of each table, the test list and the known limits.
 - **Gate.**
   - `dbt test` passes in full.
