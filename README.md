@@ -1,5 +1,7 @@
 # Agile Analytics Pipeline (AAP)
 
+[Version française](README.fr.md)
+
 A data pipeline that combines Jira delivery data with team capacity data across several teams, and answers six questions about how much each team delivers against the people it actually had.
 
 ## At a glance
