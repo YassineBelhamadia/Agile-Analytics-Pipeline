@@ -21,7 +21,7 @@ Rules for this file:
 | 3.4 | 3 | `test(dbt): add relationship and data quality tests` | done |
 | 4.1 | 4 | `feat(metrics): add sprint metrics reconciled with sprint_report` | done |
 | 4.2 | 4 | `feat(metrics): add business question models 1 to 3` | done |
-| 4.3 | 4 | `feat(metrics): add business question models 4 to 6` | planned |
+| 4.3 | 4 | `feat(metrics): add business question models 4 to 6` | done |
 | 5.1 | 5 | `feat(pipeline): add one-command pipeline run` | provisional |
 | 5.2 | 5 | `test(pipeline): add pytest wrappers for verify scripts` | provisional |
 | 5.3 | 5 | `ci: add GitHub Actions workflow` | provisional |
@@ -365,6 +365,12 @@ Adds velocity per sprint, velocity against capacity and deadline breach rate by 
   - Q4: time per status. Each stay in a status lasts from the transition into it (or creation, for the first status) to the next transition. A bounce back to an earlier status is another visit. Epics are excluded. The treatment of the still-open final stay of unresolved issues is stated and justified. Mean, median and 90th percentile by status and team.
   - Q5: bug-to-story ratio by team over time, at a time grain chosen from the data's span and justified.
   - Q6: one row per team combining velocity, capacity use, breach rate, time per status, bug-to-story ratio and the sprint hit rate, normalized fairly (per available person-day where applicable), with the normalization limits documented.
+- **Decided at the 4.1 review:** record the calendar-hours and Epic-exclusion rules when Q4 is built ([D-040](decisions.md#d-040-time-based-metrics-use-calendar-hours-exclude-epics-and-keep-open-stays-out-of-the-statistics)).
+- **Expected files.**
+  - `dbt/models/metrics/`: `rpt_q4_status_stays`, `rpt_q4_time_in_status`, `rpt_q5_bug_to_story_ratio`, `rpt_q6_team_portfolio`, `_metrics__questions_4_6.yml`; two singular tests in `dbt/tests/`
+  - `tests/test_metrics.py` (the millisecond check also covers issue creation times, which Q5 compares with sprint windows)
+  - `tests/test_dbt.py` and `docs/etl/03-dbt-star-schema.md`: three Session 3 tests whose staging edits the new metric tests also catch (the gate's first run, recorded in [`etl/04-metrics.md`](etl/04-metrics.md))
+  - `docs/metrics/q4-time-per-status.md`, `q5-bug-to-story.md`, `q6-portfolio.md`, `README.md`; `docs/metrics/q1-velocity.md` (link to Q6); `docs/etl/04-metrics.md`, `docs/etl/README.md`, `docs/decisions.md` (D-040 to D-042), this file, `CLAUDE.md`
 - **Gate.**
   - Q4 and Q5 are recomputed independently from `raw_data/` and match.
   - Q6 equals the corresponding values from Q1 to Q5, team by team.

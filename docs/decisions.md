@@ -677,3 +677,65 @@ The narrative record of the early project decisions, with the full argument for 
   - Summing across levels double-counts. The model description and the Q3 page say so.
   - Cells with no due issue have no row (48 in the shipped data).
 - **Source:** `dbt/models/metrics/rpt_q3_breach_rate.sql`, `rpt_q3_deadline_outcomes.sql`, `dbt/tests/assert_breach_rate_rollups_add_up.sql`.
+
+## D-040: Time-based metrics use calendar hours, exclude Epics, and keep open stays out of the statistics
+
+- **Date:** 2026-11-01
+- **Decision:**
+  - Q4 measures each stay in a status in calendar hours, nights and weekends included.
+  - Epics are excluded from every time-based metric.
+  - Statistics (mean, median, 90th percentile) cover completed stays only. Still-open stays are counted and their age reported separately. Done is terminal and has no statistics.
+- **Context:**
+  - Time per status needs a clock, a population and a rule for stays that haven't ended.
+  - In the shipped data, 187 of the 1,988 stays are open: 180 are To Do stays of never-scheduled issues, 5 In Progress and 2 QA.
+- **Options considered:**
+  - **Clock:** working hours (8 a day, weekdays) need a calendar of working days and hours, which v1 doesn't have ([D-028](#d-028-star-schema-with-natural-keys-and-no-date-dimension)). Calendar hours (chosen) need none, and they measure elapsed waiting time.
+  - **Epics:** kept with their single creation-to-now stay, or excluded (chosen). They never change status, so including them would only add backlog age.
+  - **Open stays:**
+    - closed at the as-of instant (a lower bound mixed with real durations, biasing every statistic down by an amount set by when the data ends);
+    - dropped silently;
+    - a survival estimate (Kaplan–Meier), the correct treatment of censored durations, but heavy for 7 in-process stays;
+    - counted and aged separately (chosen).
+- **Why:** the statistics describe only durations that are known, and nothing is hidden: the count and age of open stays sit next to them.
+- **Consequences:**
+  - A weekend inside a stay adds 48 hours, and To Do includes backlog wait before planning (median 912 h).
+  - If a later version has many long-running open stays, a survival estimate becomes worth its complexity.
+  - A bounce back to a status is another stay, and `visit_number` tells first visits from repeat ones.
+- **Source:** `dbt/models/metrics/rpt_q4_status_stays.sql`, `rpt_q4_time_in_status.sql`; [`metrics/q4-time-per-status.md`](metrics/q4-time-per-status.md).
+
+## D-041: Q5 counts issues by the sprint window they were created in
+
+- **Date:** 2026-11-01
+- **Decision:**
+  - The bug-to-story ratio is reported per team for 13 periods: the team's 12 sprint windows (`start_at <= created_at < end_at`), plus period 0, "Before Sprint 1".
+  - Each row also carries the cumulative ratio.
+- **Context:** the issues were created between 2024-01-08 and 2024-07-05. That is 26 weeks: a two-week backlog build-up, then 12 two-week sprints.
+- **Options considered:**
+  - **Weeks:** 26 points, with Atlas averaging 0.5 Bugs a week, so mostly zeros.
+  - **Calendar months:** a partial first month (24 days) and a 5-day last one.
+  - **Sprint windows** (chosen): 13 equal periods covering the whole span, on the same axis as Q1 and Q2.
+- **Why:** equal-length periods with no partial ends, and enough issues per period to read the trend, especially through the cumulative ratio.
+- **Consequences:**
+  - An issue created outside every window would be lost. The dbt test `assert_q5_counts_every_created_issue` catches it.
+  - The millisecond boundary check ([D-035](#d-035-the-millisecond-floor-is-checked-at-sprint-boundaries-not-tolerated)) now covers creation times too: 0 of 530.
+  - Per-period ratios stay noisy for Atlas (1 to 7 Stories per period).
+- **Source:** `dbt/models/metrics/rpt_q5_bug_to_story_ratio.sql`; [`metrics/q5-bug-to-story.md`](metrics/q5-bug-to-story.md).
+
+## D-042: The portfolio reads Q1 to Q5 and normalizes only size-dependent figures
+
+- **Date:** 2026-11-01
+- **Decision:**
+  - `rpt_q6_team_portfolio` has one row per team, and every value comes from `rpt_sprint_metrics` or the Q1 to Q5 models.
+  - Capacity use is completed points per available person-day, summed over all sprints before dividing.
+  - Rates, ratios and medians are not normalized further.
+- **Context:** the question asks for a fair comparison, "per available person-day where applicable". The models for each question already exist and are reconciled.
+- **Options considered:**
+  - **Recompute in the portfolio:** two definitions of each figure that could drift apart.
+  - **Divide every figure by person-days:** a breach rate or a median per person-day has no meaning.
+  - **Mean of the sprint ratios for capacity use:** weighs a short-staffed sprint like a full one. It is the sabotage case.
+  - **"Capacity use" as the share of nominal capacity left after PTO:** reported as `pto_share` for context, but it measures absence, not use.
+- **Why:** one source per number, and normalization only where team size changes the figure.
+- **Consequences:**
+  - Points are team-relative (a point costs 3.5 to 6 hours across teams), so capacity use is not comparable in effort. The page states this and shows the size of the effect with simulator-only parameters.
+  - Changing a Q1 to Q5 definition changes the portfolio with it.
+- **Source:** `dbt/models/metrics/rpt_q6_team_portfolio.sql`; [`metrics/q6-portfolio.md`](metrics/q6-portfolio.md).

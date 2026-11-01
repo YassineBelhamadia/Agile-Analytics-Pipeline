@@ -13,7 +13,7 @@
 
 ## Assumptions and limits
 
-- **Story points are team-relative.** A Phoenix point costs 3.5 hours of work and an Atlas point 6 (`simulator/personalities.py`), so velocity compares a team with itself over time, not teams with each other. Q6 (step 4.3) compares teams.
+- **Story points are team-relative.** A Phoenix point costs 3.5 hours of work and an Atlas point 6 (`simulator/personalities.py`), so velocity compares a team with itself over time, not teams with each other. [q6-portfolio.md](q6-portfolio.md) compares teams and states the limits.
 - **No carryover (v1 limit).** An issue unfinished at its sprint's end stays a member of that sprint only, and its points count in no sprint's velocity when it is finished later ([`../domain-model.md`](../domain-model.md), "Known v1 limitations"). In the shipped data, **65 issues and 343 story points** are resolved after their sprint ended. That is **28.1%** of the 1,220 points ever completed on sprint members: velocity counts the other 877 (71.9%). Put another way, real throughput is 39.1% higher than the summed velocity. By team:
 
   | Team | Velocity (12 sprints) | Finished after their sprint | Share of all completed |

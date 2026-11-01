@@ -116,6 +116,7 @@ def relevant_timestamps() -> dict[str, list[datetime]]:
         "membership added_at": [utc(m["added_at"]) for m in raw("sprint_issue_memberships")],
         "issue resolutiondate": [utc(i["resolutiondate"]) for i in raw("issues") if i["resolutiondate"]],
         "transition timestamp": [utc(t["timestamp"]) for t in raw("status_transitions")],
+        "issue created": [utc(i["created"]) for i in raw("issues")],  # Q5 periods (step 4.3)
     }
 
 
@@ -528,3 +529,286 @@ def test_the_as_of_instant_follows_the_data(warehouse, tmp_path: Path) -> None:
     )
     assert run_dbt(tmp_path, "run").returncode == 0
     assert [r["as_of_at"] for r in read(warehouse, "rpt_data_as_of", "as_of_date").values()] == [later]
+
+
+# --- Step 4.3: Q4 time per status --------------------------------------------------
+
+HOURS_TOLERANCE = 1e-9
+"""Hours. Far below the data's 1 ms resolution (2.8e-7 h), above float rounding in Postgres' percentile_cont."""
+
+
+def floor_ms(value: datetime) -> datetime:
+    """The contract's millisecond rule (D-024): the warehouse holds raw timestamps floored to milliseconds."""
+    return value.replace(microsecond=value.microsecond // 1000 * 1000)
+
+
+def hours(start: datetime, end: datetime) -> Fraction:
+    delta = floor_ms(end) - floor_ms(start)
+    return Fraction(delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds, 3_600_000_000)
+
+
+def expected_stays(raw_side: Raw) -> dict:
+    """(issue key, stay number) -> (team, status, visit, kind, duration hours or None) for every non-Epic issue."""
+    as_of = raw_side.as_of()
+    by_issue = defaultdict(list)
+    for t in raw_side.transitions:
+        by_issue[t["issue_id"]].append(t)
+    stays = {}
+    for issue in raw_side.issues.values():
+        if issue["issue_type"] == "Epic":
+            continue
+        history = sorted(by_issue[issue["issue_id"]], key=lambda t: t["timestamp"])
+        entries = [(history[0]["from_status"] if history else issue["status"], utc(issue["created"]))]
+        entries += [(t["to_status"], utc(t["timestamp"])) for t in history]
+        visits = defaultdict(int)
+        for n, (status, entered) in enumerate(entries):
+            visits[status] += 1
+            if n + 1 < len(entries):
+                kind, length = "completed", hours(entered, entries[n + 1][1])
+            elif status == "Done":
+                kind, length = "terminal", None
+            else:
+                kind, length = "open", hours(entered, as_of)
+            stays[(issue["key"], n)] = (raw_side.issue_team[issue["issue_id"]], status, visits[status], kind, length)
+    return stays
+
+
+def percentile(values: list[Fraction], p: Fraction) -> Fraction:
+    """Continuous percentile with linear interpolation, as Postgres' percentile_cont."""
+    ordered = sorted(values)
+    position = p * (len(ordered) - 1)
+    lower = math.floor(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    return ordered[lower] + (position - lower) * (ordered[upper] - ordered[lower])
+
+
+def expected_time_in_status(stays: dict) -> dict:
+    """(team key or ALL, status) -> statistics of completed stays and counts of open ones."""
+    groups = defaultdict(list)
+    for (key, _), (team, status, visit, kind, length) in stays.items():
+        if kind == "terminal":
+            continue
+        for t in (team, "ALL"):
+            groups[(t, status)].append((key, visit, kind, length))
+    expected = {}
+    for cell, rows in groups.items():
+        done = [r for r in rows if r[2] == "completed"]
+        durations = [r[3] for r in done]
+        ages = [r[3] for r in rows if r[2] == "open"]
+        expected[cell] = {
+            "stay_count": len(done),
+            "issue_count": len({r[0] for r in done}),
+            "repeat_visit_count": sum(1 for r in done if r[1] > 1),
+            "mean_hours": sum(durations) / len(durations),
+            "median_hours": percentile(durations, Fraction(1, 2)),
+            "p90_hours": percentile(durations, Fraction(9, 10)),
+            "open_stay_count": len(ages),
+            "open_median_age_hours": percentile(ages, Fraction(1, 2)) if ages else None,
+        }
+    return expected
+
+
+def near(actual, expected) -> bool:
+    if expected is None or actual is None:
+        return actual is None and expected is None
+    if isinstance(expected, Fraction):
+        return abs(float(actual) - float(expected)) <= HOURS_TOLERANCE
+    return actual == expected
+
+
+def q4_differences(connection) -> dict:
+    stays = expected_stays(Raw())
+    found = {}
+    detail = read(connection, "rpt_q4_status_stays", ("issue_key", "stay_number"))
+    actual = {k: (r["team_key"], r["status_name"], r["visit_number"], r["stay_kind"],
+                  r["duration_hours"] if r["stay_kind"] == "completed" else r["open_age_hours"]) for k, r in detail.items()}
+    for key in stays.keys() | actual.keys():
+        e, a = stays.get(key), actual.get(key)
+        if e is None or a is None or e[:4] != a[:4] or not near(a[4], e[4]):
+            found[key] = (e, a)
+
+    summary = read(connection, "rpt_q4_time_in_status", ("team_key", "status_name"))
+    expected = expected_time_in_status(stays)
+    if summary.keys() != expected.keys():
+        found["cells"] = sorted(summary.keys() ^ expected.keys())
+    for cell in summary.keys() & expected.keys():
+        wrong = [column for column, value in expected[cell].items() if not near(summary[cell][column], value)]
+        if wrong:
+            found[cell] = wrong
+    return found
+
+
+def test_q4_raw_histories_start_in_to_do_and_never_leave_done() -> None:
+    """The assumptions the stay model rests on, checked on raw_data/: no ties, a To Do start, no exit from Done."""
+    by_issue = defaultdict(list)
+    for t in raw("status_transitions"):
+        by_issue[t["issue_id"]].append(t)
+    for history in by_issue.values():
+        assert len({t["timestamp"] for t in history}) == len(history)
+        history.sort(key=lambda t: t["timestamp"])
+        assert history[0]["from_status"] == "To Do"
+        assert all(a["to_status"] == b["from_status"] for a, b in zip(history, history[1:]))
+        assert all(t["from_status"] != "Done" for t in history)
+
+
+@pytest.mark.postgres
+def test_q4_time_in_status_matches_raw_data(warehouse, tmp_path: Path) -> None:
+    """All 1,988 stays and all 16 statistic cells, with durations in calendar hours."""
+    build(tmp_path)
+    assert q4_differences(warehouse) == {}
+
+
+@pytest.mark.postgres
+def test_sabotage_q4_starting_the_first_stay_at_the_first_transition_fails(warehouse, tmp_path: Path) -> None:
+    """Sabotage: the first stay starts at the first transition instead of creation. Every To Do stay collapses to 0 h."""
+    build_sabotaged(tmp_path, "rpt_q4_status_stays", {
+        "issues.created_at as entered_at": "coalesce(first_transition.transitioned_at, issues.created_at) as entered_at",
+    })
+    found = q4_differences(warehouse)
+    to_do_cells = {cell for cell in found if isinstance(cell[0], str) and cell[1] == "To Do" and len(cell) == 2}
+    assert to_do_cells == {("ALL", "To Do"), ("PHX", "To Do"), ("NMD", "To Do"), ("ATL", "To Do")}
+    assert not any(cell[1] in ("In Progress", "Code Review", "QA") for cell in found if isinstance(cell[1], str))
+
+
+# --- Q5: bug-to-story ratio ---------------------------------------------------------
+
+
+def expected_q5(raw_side: Raw) -> dict:
+    """(team key, period number) -> bug, story and task counts, by the sprint window each issue was created in."""
+    expected = {}
+    for team, sprint_ids in raw_side.team_sprints.items():
+        windows_ = [(0, None, boundary(raw_side.sprints[sprint_ids[0]]["start_date"]))]
+        windows_ += [(n, boundary(raw_side.sprints[s]["start_date"]), boundary(raw_side.sprints[s]["end_date"]))
+                     for n, s in enumerate(sprint_ids, start=1)]
+        for number, start, end in windows_:
+            created = [i for i in raw_side.issues.values()
+                       if raw_side.issue_team[i["issue_id"]] == team
+                       and (start is None or utc(i["created"]) >= start) and utc(i["created"]) < end]
+            counts = {t: sum(1 for i in created if i["issue_type"] == t) for t in ("Bug", "Story", "Task")}
+            expected[(team, number)] = {"bug_count": counts["Bug"], "story_count": counts["Story"], "task_count": counts["Task"]}
+    for team in raw_side.team_sprints:
+        bugs = stories = 0
+        for number in range(13):
+            cell = expected[(team, number)]
+            bugs, stories = bugs + cell["bug_count"], stories + cell["story_count"]
+            cell["bug_to_story_ratio"] = Fraction(cell["bug_count"], cell["story_count"]) if cell["story_count"] else None
+            cell["cumulative_bug_to_story_ratio"] = Fraction(bugs, stories) if stories else None
+    return expected
+
+
+def q5_differences(connection) -> dict:
+    expected = expected_q5(Raw())
+    actual = read(connection, "rpt_q5_bug_to_story_ratio", ("team_key", "period_number"))
+    if actual.keys() != expected.keys():
+        return {"cells": sorted(actual.keys() ^ expected.keys())}
+    found = {}
+    for cell, values in expected.items():
+        wrong = [
+            column for column, value in values.items()
+            if not ((actual[cell][column] is None) if value is None
+                    else close(actual[cell][column], value) if isinstance(value, Fraction)
+                    else actual[cell][column] == value)
+        ]
+        if wrong:
+            found[cell] = wrong
+    return found
+
+
+def test_q5_periods_cover_every_created_issue() -> None:
+    """13 periods per team hold all 500 non-Epic issues: none is created outside them."""
+    expected = expected_q5(Raw())
+    assert len(expected) == 39
+    assert sum(c["bug_count"] + c["story_count"] + c["task_count"] for c in expected.values()) == 500
+
+
+@pytest.mark.postgres
+def test_q5_bug_to_story_ratio_matches_raw_data(warehouse, tmp_path: Path) -> None:
+    build(tmp_path)
+    assert q5_differences(warehouse) == {}
+
+
+@pytest.mark.postgres
+def test_sabotage_q5_counting_only_scheduled_issues_fails(warehouse, tmp_path: Path) -> None:
+    """Sabotage: count only issues that joined a sprint (the option D-020 rejected). The counts and ratios differ."""
+    build_sabotaged(tmp_path, "rpt_q5_bug_to_story_ratio", {
+        "where issue_type in ('Bug', 'Story', 'Task')":
+        "where issue_type in ('Bug', 'Story', 'Task') and issue_id in (select issue_id from {{ ref('fct_sprint_membership') }})",
+    })
+    found = q5_differences(warehouse)
+    assert found
+    assert {c for columns in found.values() for c in columns} >= {"bug_count", "story_count", "bug_to_story_ratio"}
+
+
+# --- Q6: portfolio ------------------------------------------------------------------
+
+
+def expected_q6(connection) -> dict:
+    """Team key -> the portfolio values, read from rpt_sprint_metrics and the Q1 to Q5 tables and combined here."""
+    sprints = read(connection, "rpt_sprint_metrics", "sprint_id").values()
+    q1 = read(connection, "rpt_q1_velocity", "sprint_id").values()
+    q2 = read(connection, "rpt_q2_velocity_vs_capacity", "sprint_id").values()
+    q3 = read(connection, "rpt_q3_breach_rate", ("team_key", "issue_type", "commitment"))
+    q4 = read(connection, "rpt_q4_time_in_status", ("team_key", "status_name"))
+    q5 = read(connection, "rpt_q5_bug_to_story_ratio", ("team_key", "period_number")).values()
+    expected = {}
+    for team in ("PHX", "NMD", "ATL"):
+        mine = lambda rows: [r for r in rows if r["team_key"] == team]  # noqa: E731
+        s, v, c, r = mine(sprints), mine(q1), mine(q2), mine(q5)
+        breach = q3[(team, "All types", "All")]
+        expected[team] = {
+            "sprint_count": len(s),
+            "mean_headcount": Fraction(sum(x["headcount"] for x in c), len(c)),
+            "available_person_days": sum(x["available_person_days"] for x in c),
+            "pto_share": sum(x["pto_days"] for x in c) / sum(x["headcount"] * WORKING_DAYS for x in c),
+            "velocity_per_sprint": Fraction(sum(int(x["velocity_points"]) for x in v), len(v)),
+            "points_per_person_day": float(sum(x["completed_points"] for x in c)) / sum(x["available_person_days"] for x in c),
+            "hit_count": sum(1 for x in s if x["is_hit"]),
+            "hit_rate": Fraction(sum(1 for x in s if x["is_hit"]), len(s)),
+            "breach_rate_resolved": breach["breach_rate_resolved"],
+            "breach_rate_incl_overdue": breach["breach_rate_incl_overdue"],
+            "open_overdue_count": breach["open_overdue_count"],
+            "median_hours_to_do": q4[(team, "To Do")]["median_hours"],
+            "median_hours_in_progress": q4[(team, "In Progress")]["median_hours"],
+            "median_hours_code_review": q4[(team, "Code Review")]["median_hours"],
+            "median_hours_qa": q4[(team, "QA")]["median_hours"],
+            "bug_to_story_ratio": Fraction(sum(x["bug_count"] for x in r), sum(x["story_count"] for x in r)),
+        }
+    return expected
+
+
+def q6_differences(connection) -> dict:
+    expected = expected_q6(connection)
+    actual = read(connection, "rpt_q6_team_portfolio", "team_key")
+    assert actual.keys() == expected.keys()
+    found = {}
+    for team, values in expected.items():
+        wrong = []
+        for column, value in values.items():
+            got = actual[team][column]
+            if isinstance(value, Fraction):
+                ok = close(got, value)
+            elif isinstance(value, float):
+                ok = math.isclose(got, value, rel_tol=1e-12)
+            else:
+                ok = got == value
+            if not ok:
+                wrong.append(column)
+        if wrong:
+            found[team] = wrong
+    return found
+
+
+@pytest.mark.postgres
+def test_q6_portfolio_equals_the_q1_to_q5_values(warehouse, tmp_path: Path) -> None:
+    build(tmp_path)
+    assert q6_differences(warehouse) == {}
+
+
+@pytest.mark.postgres
+def test_sabotage_q6_averaging_the_sprint_ratios_fails(warehouse, tmp_path: Path) -> None:
+    """Sabotage: capacity use as the mean of the sprint ratios instead of the capacity-weighted total. All 3 teams differ."""
+    build_sabotaged(tmp_path, "rpt_q6_team_portfolio", {
+        "sum(completed_points) / sum(available_person_days) as points_per_person_day":
+        "avg(points_per_person_day) as points_per_person_day",
+    })
+    assert q6_differences(warehouse) == {team: ["points_per_person_day"] for team in ("PHX", "NMD", "ATL")}

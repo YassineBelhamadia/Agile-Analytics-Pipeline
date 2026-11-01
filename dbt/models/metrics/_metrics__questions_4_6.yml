@@ -1,0 +1,254 @@
+version: 2
+
+models:
+  - name: rpt_q4_status_stays
+    description: >
+      Q4 detail. Grain: one row per stay of a non-Epic issue in a status
+      (issue_id, stay_number). A stay runs from entering the status (creation,
+      for the first) to the issue's next transition; a bounce back to an earlier
+      status is another stay. Calendar hours (D-040). Page: docs/metrics/q4-time-per-status.md.
+    data_tests:
+      - expected_row_count:
+          arguments:
+            expected: 1988
+      - unique_combination:
+          arguments:
+            columns: [issue_id, stay_number]
+    columns:
+      - name: issue_id
+        description: Jira issue ID.
+        data_tests: [not_null]
+      - name: stay_number
+        description: 0 for the stay the issue was created in, then the number of the transition that started the stay.
+        data_tests: [not_null]
+      - name: issue_key
+        description: Jira issue key.
+        data_tests: [not_null]
+      - name: issue_type
+        description: Story, Task or Bug (Epics excluded).
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [Story, Task, Bug]
+      - name: team_id
+        description: Jira project ID of the issue's team.
+        data_tests: [not_null]
+      - name: team_key
+        description: Jira project key of the team.
+        data_tests: [not_null]
+      - name: team_name
+        description: Team (Jira project) name.
+        data_tests: [not_null]
+      - name: sprint_id
+        description: The first sprint the issue joined. Null for the 180 issues never scheduled.
+      - name: sprint_name
+        description: Name of that sprint, null when never scheduled.
+      - name: sprint_number
+        description: Position of that sprint in its team's sequence, null when never scheduled.
+      - name: status_name
+        description: The status of this stay.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [To Do, In Progress, Code Review, QA, Done]
+      - name: status_order
+        description: Workflow position for sorting (To Do 1 to Done 5).
+        data_tests: [not_null]
+      - name: visit_number
+        description: 1 for the issue's first stay in this status, 2 or more after a bounce back to it.
+        data_tests: [not_null]
+      - name: entered_at
+        description: When the stay started (creation or the transition into the status).
+        data_tests: [not_null]
+      - name: left_at
+        description: The next transition, null for open and terminal stays.
+      - name: stay_kind
+        description: >
+          completed (ended by a transition), open (current status of an
+          unresolved issue, still running at the as-of instant) or terminal (Done).
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [completed, open, terminal]
+      - name: duration_hours
+        description: left_at - entered_at in calendar hours, for completed stays only.
+      - name: open_age_hours
+        description: as-of instant - entered_at in calendar hours, for open stays only. A lower bound on the stay's duration.
+
+  - name: rpt_q4_time_in_status
+    description: >
+      Q4, time per status. Grain: one row per team_name x status_name, plus
+      "All teams" rows (never sum across them). Mean, median and 90th
+      percentile of completed stays in calendar hours; open stays are counted
+      separately and never mixed in (D-040). Done is terminal and has no row.
+    data_tests:
+      - expected_row_count:
+          arguments:
+            expected: 16
+      - unique_combination:
+          arguments:
+            columns: [team_name, status_name]
+    columns:
+      - name: team_name
+        description: Team name, or "All teams".
+        data_tests: [not_null]
+      - name: team_key
+        description: Jira project key, or "ALL".
+        data_tests: [not_null]
+      - name: status_name
+        description: To Do, In Progress, Code Review or QA.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [To Do, In Progress, Code Review, QA]
+      - name: status_order
+        description: Workflow position for sorting (1 to 4).
+        data_tests: [not_null]
+      - name: stay_count
+        description: Completed stays, repeat visits included.
+        data_tests: [not_null]
+      - name: issue_count
+        description: Distinct issues with at least one completed stay.
+        data_tests: [not_null]
+      - name: repeat_visit_count
+        description: Completed stays that were a second or later visit to the status (after a QA bounce).
+        data_tests: [not_null]
+      - name: mean_hours
+        description: Mean duration of completed stays, calendar hours.
+        data_tests: [not_null]
+      - name: median_hours
+        description: Median duration of completed stays (continuous percentile), calendar hours.
+        data_tests: [not_null]
+      - name: p90_hours
+        description: 90th percentile of completed stays (continuous, interpolated), calendar hours.
+        data_tests: [not_null]
+      - name: open_stay_count
+        description: Stays still running at the as-of instant, excluded from the statistics.
+        data_tests: [not_null]
+      - name: open_median_age_hours
+        description: Median age of the open stays at the as-of instant. Null when there are none.
+
+  - name: rpt_q5_bug_to_story_ratio
+    description: >
+      Q5, bug-to-story ratio by team over time. Grain: one row per team x
+      period (team_id, period_number). Every created issue counts, scheduled or
+      not (D-020). Periods are the team's sprint windows, plus period 0 "Before
+      Sprint 1" (D-041). Page: docs/metrics/q5-bug-to-story.md.
+    data_tests:
+      - expected_row_count:
+          arguments:
+            expected: 39
+      - unique_combination:
+          arguments:
+            columns: [team_id, period_number]
+    columns:
+      - name: team_id
+        description: Jira project ID.
+        data_tests: [not_null]
+      - name: team_key
+        description: Jira project key.
+        data_tests: [not_null]
+      - name: team_name
+        description: Team (Jira project) name.
+        data_tests: [not_null]
+      - name: period_number
+        description: 0 before the first sprint, then the sprint number (1 to 12).
+        data_tests: [not_null]
+      - name: sprint_id
+        description: The sprint whose window this period is; null for period 0.
+      - name: sprint_name
+        description: The sprint's name, or "Before Sprint 1".
+        data_tests: [not_null]
+      - name: start_at
+        description: Window start (sprint start_at); null for period 0, which has no lower bound.
+      - name: end_at
+        description: Window end (sprint end_at, or the first sprint's start for period 0).
+        data_tests: [not_null]
+      - name: bug_count
+        description: Bugs created in the window.
+        data_tests: [not_null]
+      - name: story_count
+        description: Stories created in the window.
+        data_tests: [not_null]
+      - name: task_count
+        description: Tasks created in the window (context; not in the ratio).
+        data_tests: [not_null]
+      - name: bug_to_story_ratio
+        description: bug_count / story_count. Null when no Story was created in the window.
+      - name: cumulative_bug_to_story_ratio
+        description: Bugs over Stories created from the start up to and including this period. Steadier than the per-period ratio.
+
+  - name: rpt_q6_team_portfolio
+    description: >
+      Q6, cross-team portfolio. Grain: one row per team (team_id), over all its
+      sprints. Every value is read from rpt_sprint_metrics and the Q1 to Q5
+      models (D-042); size-dependent figures are per available person-day.
+      Page: docs/metrics/q6-portfolio.md.
+    data_tests:
+      - expected_row_count:
+          arguments:
+            expected: 3
+    columns:
+      - name: team_id
+        description: Jira project ID. Primary key.
+        data_tests: [unique, not_null]
+      - name: team_key
+        description: Jira project key.
+        data_tests: [not_null]
+      - name: team_name
+        description: Team (Jira project) name.
+        data_tests: [not_null]
+      - name: sprint_count
+        description: Sprints covered (Sprint 1 to Sprint N).
+        data_tests: [not_null]
+      - name: mean_headcount
+        description: Mean headcount over the team's sprints (Q2).
+        data_tests: [not_null]
+      - name: available_person_days
+        description: Available person-days summed over the team's sprints (Q2).
+        data_tests: [not_null]
+      - name: pto_share
+        description: PTO days as a share of nominal person-days (headcount x 10), over all sprints.
+        data_tests: [not_null]
+      - name: velocity_per_sprint
+        description: Mean completed points per sprint (Q1). Not normalized; depends on team size and point size.
+        data_tests: [not_null]
+      - name: points_per_person_day
+        description: >
+          Capacity use: completed points over available person-days, summed over
+          all sprints (Q2). Normalized for team size and PTO, not for what a point costs.
+        data_tests: [not_null]
+      - name: hit_count
+        description: Sprints where completed >= committed.
+        data_tests: [not_null]
+      - name: hit_rate
+        description: hit_count / sprint_count.
+        data_tests: [not_null]
+      - name: breach_rate_resolved
+        description: Q3 headline for the team, all types, late / resolved.
+        data_tests: [not_null]
+      - name: breach_rate_incl_overdue
+        description: Q3 rate including open overdue issues.
+        data_tests: [not_null]
+      - name: open_overdue_count
+        description: Q3 open and overdue issues at the as-of instant.
+        data_tests: [not_null]
+      - name: median_hours_to_do
+        description: Q4 median completed stay in To Do, calendar hours (backlog wait before work starts).
+        data_tests: [not_null]
+      - name: median_hours_in_progress
+        description: Q4 median completed stay in In Progress, calendar hours.
+        data_tests: [not_null]
+      - name: median_hours_code_review
+        description: Q4 median completed stay in Code Review, calendar hours.
+        data_tests: [not_null]
+      - name: median_hours_qa
+        description: Q4 median completed stay in QA, calendar hours.
+        data_tests: [not_null]
+      - name: bug_to_story_ratio
+        description: Q5, all Bugs over all Stories the team created.
+        data_tests: [not_null]

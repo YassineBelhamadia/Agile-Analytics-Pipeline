@@ -318,7 +318,10 @@ def test_a_transition_on_a_sprint_boundary_belongs_to_the_later_sprint(warehouse
         sql.SQL(
             "update {t} set transitioned_at = (select start_at from {s} where sprint_id = " + boundary_sprint + ") "
             "where changelog_id = (select min(changelog_id) from {t} where issue_id in "
-            "(select issue_id from {i} where issue_key like 'PHX-%%')) returning changelog_id"
+            "(select issue_id from {i} where issue_key like 'PHX-%%' "
+            # Only an issue that already exists at the boundary: a transition before its issue's creation is an
+            # impossible history, which the Q4 stay test (assert_status_stays_chain_without_gaps) rightly rejects.
+            "and created_at < (select start_at from {s} where sprint_id = " + boundary_sprint + "))) returning changelog_id"
         ).format(t=staging("status_transitions"), s=staging("sprints"), b=staging("boards"), i=staging("issues"))
     ).fetchone()[0]
 
@@ -368,6 +371,10 @@ def test_sabotage_overlapping_sprints_fail_the_window_test(warehouse, tmp_path: 
         "assert_each_transition_in_exactly_one_sprint_window",
         "unique_fct_status_transitions_changelog_id",
         "expected_row_count_fct_status_transitions_1488",
+        # Since step 4.3 the metrics catch it too: duplicated transitions add Q4 stays, and issues created in
+        # the overlapping day fall in two Q5 periods.
+        "expected_row_count_rpt_q4_status_stays_1988",
+        "assert_q5_counts_every_created_issue",
     }
 
 
@@ -399,6 +406,7 @@ def test_sabotage_a_duplicate_key_fails_unique_and_the_row_count(warehouse, tmp_
         "unique_fct_status_transitions_changelog_id",
         "expected_row_count_fct_status_transitions_1488",
         "assert_each_transition_in_exactly_one_sprint_window",
+        "expected_row_count_rpt_q4_status_stays_1988",  # since step 4.3: the copy adds a Q4 stay
     }
 
 

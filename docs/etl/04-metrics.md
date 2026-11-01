@@ -1,10 +1,10 @@
 # 04. Sprint metrics and business questions
 
-Status: in progress (Session 4, [`../etl-plan.md`](../etl-plan.md)).
+Status: done (Session 4, [`../etl-plan.md`](../etl-plan.md)).
 
 - **Step 4.1** (done): `rpt_sprint_metrics`, reconciled with `simulator/sprint_report.py` for all 36 sprints.
 - **Step 4.2** (done): business questions 1 to 3 (velocity, velocity against capacity, breach rate), each recomputed from `raw_data/`.
-- **Step 4.3:** business questions 4 to 6.
+- **Step 4.3** (done): business questions 4 to 6 (time per status, bug-to-story ratio, cross-team portfolio), with an index in [`../metrics/README.md`](../metrics/README.md).
 
 Each question has its own page in [`../metrics/`](../metrics/): what it asks, the formula, the assumptions, how it was verified, and an example result.
 
@@ -49,6 +49,10 @@ Every model carries the team name, and the sprint name and number where its grai
 | `rpt_q2_velocity_vs_capacity` | Q2 velocity against capacity | sprint | 36 | [q2-velocity-vs-capacity.md](../metrics/q2-velocity-vs-capacity.md) |
 | `rpt_q3_deadline_outcomes` | Q3 detail | issue with a due date | 320 | [q3-breach-rate.md](../metrics/q3-breach-rate.md) |
 | `rpt_q3_breach_rate` | Q3 breach rate | team × issue type × commitment, with "All" rollups | 48 | [q3-breach-rate.md](../metrics/q3-breach-rate.md) |
+| `rpt_q4_status_stays` | Q4 detail | stay of an issue in a status | 1,988 | [q4-time-per-status.md](../metrics/q4-time-per-status.md) |
+| `rpt_q4_time_in_status` | Q4 time per status | team × status, with "All teams" rows | 16 | [q4-time-per-status.md](../metrics/q4-time-per-status.md) |
+| `rpt_q5_bug_to_story_ratio` | Q5 bug-to-story ratio | team × two-week period (sprint window, plus "Before Sprint 1") | 39 | [q5-bug-to-story.md](../metrics/q5-bug-to-story.md) |
+| `rpt_q6_team_portfolio` | Q6 portfolio | team | 3 | [q6-portfolio.md](../metrics/q6-portfolio.md) |
 
 ### The definitions in plain words
 
@@ -77,6 +81,7 @@ A test counts those values in `raw_data/` ([D-035](../decisions.md#d-035-the-mil
 | membership `added_at` | 320 | 0 | 244 (committed at planning) |
 | issue `resolutiondate` | 313 | 0 | 0 |
 | transition `timestamp` | 1,488 | 0 | 0 |
+| issue `created` (Q5 periods, added in step 4.3) | 530 | 0 | 0 |
 
 Values exactly on a boundary are already whole milliseconds, so flooring leaves them there. The exact reconciliation therefore does not pass by luck. A dataset where the check fails needs a contract fix (for example, microseconds from the API), not a tolerance.
 
@@ -107,6 +112,14 @@ Step 4.2 added 67 tests, for 161 in the project:
 - `accepted_values` on `issue_type`, `commitment` and `outcome`.
 - **`assert_pto_within_sprint_person_days`:** no capacity row has PTO below 0 or above `headcount × 10`.
 - **`assert_breach_rate_rollups_add_up`:** every rollup row of `rpt_q3_breach_rate` is the sum of its parts along each dimension, and the grand total is all 320 due issues.
+
+### dbt tests on questions 4 to 6 (step 4.3)
+
+Step 4.3 added 65 tests, for 226 in the project:
+
+- Grain tests (`unique_combination`), `not_null` and row counts (1,988, 16, 39, 3), and `accepted_values` on statuses, stay kinds and issue types.
+- **`assert_status_stays_chain_without_gaps`:** each completed stay ends where the next starts, no duration is negative, and each issue ends on an open or terminal stay.
+- **`assert_q5_counts_every_created_issue`:** the Q5 periods hold every non-Epic issue exactly once.
 
 ### Reconciliation with the answer key (pytest)
 
@@ -139,6 +152,29 @@ Same file. The expected side is plain Python on `raw_data/*.json`, without the a
 | `test_the_as_of_instant_follows_the_data` | a later event moves the as-of instant ([D-036](../decisions.md#d-036-the-as-of-instant-is-derived-from-the-data)) |
 
 Sabotage runs edit a copy of the dbt project (`sabotaged_project`). Each edited text must occur exactly once, so a sabotage can't silently miss. The real project is never edited.
+
+### Questions 4 to 6 (pytest, step 4.3)
+
+| Test | What it proves |
+|---|---|
+| `test_q4_raw_histories_start_in_to_do_and_never_leave_done` | Q4's assumptions on `raw_data/`: no ties, a To Do start, a chained history, no exit from Done |
+| `test_q4_time_in_status_matches_raw_data` | all 1,988 stays and all 16 cells against plain Python, to 1e-9 h |
+| `test_sabotage_q4_starting_the_first_stay_at_the_first_transition_fails` | **Sabotage:** the first stay from the first transition breaks exactly the four To Do cells |
+| `test_q5_periods_cover_every_created_issue` | the 13 periods per team hold all 500 non-Epic issues |
+| `test_q5_bug_to_story_ratio_matches_raw_data` | all 39 rows against plain Python |
+| `test_sabotage_q5_counting_only_scheduled_issues_fails` | **Sabotage:** counting only scheduled issues (rejected by D-020) changes the counts and ratios |
+| `test_q6_portfolio_equals_the_q1_to_q5_values` | every Q6 value equals the Q1 to Q5 values, team by team |
+| `test_sabotage_q6_averaging_the_sprint_ratios_fails` | **Sabotage:** a mean of sprint ratios makes `points_per_person_day` differ for all 3 teams, and nothing else |
+
+### Gate run for step 4.3
+
+- **`dbt build`**, real schemas: `PASS=251 WARN=0 ERROR=0` (8 views, 17 tables, 226 data tests).
+- **pytest** `tests/test_metrics.py`: 24 passed, 0 skipped.
+- **First full-suite run: 3 failed, 100 passed.** Three Session 3 tests in `tests/test_dbt.py` edit `staging_test`, and the new metric tests also caught those edits:
+  - the boundary test moved a transition of PHX-138 to 2024-04-01 09:00, four days before PHX-138 was created, and `assert_status_stays_chain_without_gaps` rejected the negative stay;
+  - the overlapping-sprint and duplicate-key sabotages now also fail the Q4 stay count, and the overlap fails the Q5 period check.
+  - **Fix:** the boundary test now moves a transition of an issue created before the boundary, and the two sabotage tests list the extra failures they cause. No metric model changed.
+- **Second run:** `dbt build` `PASS=251`; full pytest 103 passed, 0 skipped; hooks 28 passed, 0 failed.
 
 ### Gate run for step 4.2
 
@@ -205,7 +241,9 @@ Totals: PHX hit 5 of 12 sprints (581 committed, 105 scope added, 509 completed),
 - **Scope creep is not scaled to team size.** Scope adds arrive at the same rate for every team, so they weigh far more on Atlas's small commitment (90 added on 139 committed) than on Phoenix's (105 on 581) ([`../domain-model.md`](../domain-model.md), "Known v1 limitations").
 - **One team per user.** Every sprint figure is a team figure. Nothing is split across teams.
 - **Millisecond precision.** Correct only while no relevant raw value falls in the first millisecond after a boundary. The check fails loudly if one does.
-- **`expected_row_count` 36** and the 17-sprint sabotage count are the SEED=22 shipped dataset's.
+- **Calendar hours, no Epics.** Every duration counts nights and weekends, and Epics are in no time-based metric ([D-040](../decisions.md#d-040-time-based-metrics-use-calendar-hours-exclude-epics-and-keep-open-stays-out-of-the-statistics)).
+- **Story points are team-relative.** A point costs a different number of hours in each team, so points compare a team with itself. The portfolio states the effect ([q6-portfolio.md](../metrics/q6-portfolio.md)).
+- **Dataset-specific targets.** The row counts and sabotage counts are the SEED=22 shipped dataset's.
 
 ## Options rejected and why
 
@@ -216,3 +254,6 @@ Totals: PHX hit 5 of 12 sprints (581 committed, 105 scope added, 509 completed),
 - **Headcount only, hours, planned PTO:** [D-037](../decisions.md#d-037-available-capacity-is-headcount--10-working-days--pto-days).
 - **A centred window, nulls before three sprints, the mean of ratios:** [D-038](../decisions.md#d-038-rolling-figures-cover-the-sprint-and-the-two-before-it).
 - **Separate by-type and by-team models, rates as DAX measures:** [D-039](../decisions.md#d-039-breach-rates-ship-as-a-table-with-labelled-rollups-plus-an-issue-level-table).
+- **Working hours, Epics in Q4, open stays closed at the as-of instant, a survival estimate:** [D-040](../decisions.md#d-040-time-based-metrics-use-calendar-hours-exclude-epics-and-keep-open-stays-out-of-the-statistics).
+- **Weeks or calendar months for Q5:** [D-041](../decisions.md#d-041-q5-counts-issues-by-the-sprint-window-they-were-created-in).
+- **Recomputing figures in Q6, normalizing rates per person-day, a mean of ratios:** [D-042](../decisions.md#d-042-the-portfolio-reads-q1-to-q5-and-normalizes-only-size-dependent-figures).

@@ -75,7 +75,7 @@ defensible in an interview, including the options we rejected.
 320 sprint memberships, 320 issues with a duedate (210 null). Extraction, staging and warehouse
 counts must match these. Staging also equals raw_data/ row by row (raw timestamps truncated to ms; docs/etl/02-staging.md).
 - Marts (dbt): dims 3 teams / 12 users / 36 sprints / 530 issues; facts 1,488 / 320 / 36 (dbt tests check these).
-  `rpt_sprint_metrics`: 36 rows, all 6 values equal sprint_report.py for every sprint (hits PHX 5, NMD 6, ATL 9).
+  Metrics: `rpt_sprint_metrics` equals sprint_report.py on all 36 sprints (hits PHX 5, NMD 6, ATL 9); index docs/metrics/.
 - Landing: 3 boards, 36 sprints, 530 issues, 36 capacity rows, changelogs 1,488 status + 320
   Sprint entries, 320 sprint-issue entries; 579 files at default page sizes, reruns byte-identical.
 - Calibration: seeds 1-60, held out 61-100 (`simulator/calibration.py`); results only in domain-model.md.
@@ -115,8 +115,8 @@ counts must match these. Staging also equals raw_data/ row by row (raw timestamp
 1. Session 1: capacity endpoint, Postgres in Docker, extraction client (done)
 2. Session 2: parsing and staging tables (done, on `feat/etl-session-2`)
 3. Session 3: dbt star schema (done, on `feat/etl-session-3`; docs/etl/03-dbt-star-schema.md)
-4. Session 4: sprint metrics and the six business questions (in progress on `feat/etl-session-4`; 4.1-4.2 done; docs/metrics/)
-5. Session 5: one-command pipeline, tests, CI, docs, clean run from an empty database
+4. Session 4: sprint metrics and the six business questions (done, on `feat/etl-session-4`; docs/metrics/)
+5. Session 5: one-command pipeline, tests, CI, docs, clean run from an empty database (next)
 
 If behind schedule, cut in this order: GitHub Actions, date dimension, docs polish. Never cut the reconciliation against `sprint_report.py`.
 
