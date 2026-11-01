@@ -538,3 +538,65 @@ The narrative record of the early project decisions, with the full argument for 
   - Metrics use `end_at`, never `complete_at`, so the derivation affects no reported figure.
   - If a later simulator records real completion times, this rule must change.
 - **Source:** `tests/test_staging_reconciliation.py` (`sprint_complete_at`, `test_sabotage_3_...`); [`etl/03-dbt-star-schema.md`](etl/03-dbt-star-schema.md).
+
+## D-033: Metrics are dbt SQL models, built as tables in `marts`
+
+- **Date:** 2026-11-01
+- **Decision:**
+  - Sprint metrics and the six business questions are SQL models in `dbt/models/metrics/`, built as tables in schema `marts`, next to the star schema.
+  - They are named `rpt_<subject>`: `rpt_sprint_metrics` (step 4.1), then one or more `rpt_q<N>_<subject>` models per business question.
+  - Each one has a documented grain, carries the team name and the sprint name or number, and needs no further join in the BI tool. Every model and column has a description in its `schema.yml`.
+- **Context:** Session 4 builds the layer the dashboard reads. Every figure must be traceable to the star schema and testable with the same tools.
+- **Options considered:**
+  - **Python (pandas) metrics** writing tables. Ruled out by Yassine at session start: a second transformation tool, outside dbt's lineage and tests.
+  - **Measures in Power BI (DAX).** The figures would exist only inside the BI file, with no reconciliation against the answer key and nothing to review in git.
+  - **Views instead of tables.** Cheap to build, but every dashboard refresh would recompute them, and a broken upstream table would show up only when someone opens the report. Tables are rebuilt and tested by `dbt build`.
+  - **A separate `metrics` schema.** Ruled out by Yassine at session start: `marts` is the one schema the dashboard reads.
+  - **Prefix.** `fct_` would suggest an event grain, but these are aggregates. `mart_` repeats the schema name. `rpt_` says "reporting model, ready to read".
+  - **The `marts/` folder.** A separate `metrics/` folder keeps the two layers visible ("dbt star schema → business-question models" in `CLAUDE.md`), at the cost of three config lines in `dbt_project.yml`.
+- **Why:** dbt already holds the star schema and its tests. Keeping the metrics there gives one lineage graph, one test runner and SQL a reviewer can read.
+- **Consequences:**
+  - `dbt build` rebuilds and tests the metrics with everything else.
+  - The dashboard reads tables with no joins, so the BI file holds presentation only.
+  - The model names are a contract for the dashboard. Renaming one later is a breaking change.
+- **Source:** `dbt/dbt_project.yml`, `dbt/models/metrics/`; [`etl/04-metrics.md`](etl/04-metrics.md).
+
+## D-034: Sprint metrics read the membership fact and `end_at`, reconciled with `sprint_report.py`
+
+- **Date:** 2026-11-01
+- **Decision:**
+  - `rpt_sprint_metrics` takes a sprint's issues from `fct_sprint_membership`.
+  - Committed is `added_at <= start_at`, scope added `added_at > start_at`, and completed `resolved_at <= end_at`, all exact instants ([D-012](#d-012-sprint-metrics-compare-exact-timestamps)).
+  - It reports every value the answer key reports: committed, scope added, completed, hit (`completed >= committed`), bug count and issue count.
+  - `tests/test_metrics.py` calls `compute_sprint_report` on `raw_data/` and requires equality for all 36 sprints, on all six values.
+- **Context:** `simulator/sprint_report.py` is the answer key. A mismatch is a bug in one side, never a rounding detail.
+- **Options considered:**
+  - **Calendar days** (`added_at::date <= start_date`). The original bug: it changes 17 of the 36 sprints in the shipped data. It is the sabotage case.
+  - **`complete_at` for the end.** It is derived from the scheduled end and reconciled only against that rule ([D-032](#d-032-sprint-complete_at-is-reconciled-against-a-derived-value)). `end_at` is the instant the answer key uses.
+  - **`event_sprint_id` to pick a sprint's issues.** It places a transition in the sprint it happened in, and 216 transitions fall after their issue's sprint ended ([D-030](#d-030-a-transitions-sprint-is-the-window-it-happened-in-event_sprint_id)). The answer key counts membership.
+  - **The "→ Done" transition time for completed.** Equivalent in the data, but the answer key reads `resolutiondate`, so `resolved_at` keeps the two sides comparable line by line.
+  - **Expected values from a hand-written Python formula.** Calling the answer key itself means the test can't agree with the warehouse on a shared misreading of the definitions.
+- **Why:** the answer key defines the figures, and the reconciliation must compare against it, not against a restatement of it.
+- **Consequences:**
+  - Completed counts every member resolved by the end, scope-added issues included, as the answer key does. So a sprint can be hit while committed work is unfinished.
+  - Work finished after its sprint ended counts in no sprint (no carryover): 65 issues and 343 story points in the shipped data. Velocity reads lower than real throughput.
+  - Calling the answer key imports `simulator/` code into the test. The import is read-only: the answer key is never edited to make a check pass.
+- **Source:** `dbt/models/metrics/rpt_sprint_metrics.sql`, `tests/test_metrics.py`; [`etl/04-metrics.md`](etl/04-metrics.md).
+
+## D-035: The millisecond floor is checked at sprint boundaries, not tolerated
+
+- **Date:** 2026-11-01
+- **Decision:** a test reads `raw_data/` and counts raw membership `added_at`, issue `resolutiondate` and transition timestamps that fall strictly inside the first millisecond after any sprint boundary. The count must be 0. It is 0 in the shipped data.
+- **Context:**
+  - The warehouse holds timestamps floored to milliseconds ([D-024](#d-024-reconciliation-truncates-raw-timestamps-to-milliseconds)). The answer key compares raw microsecond values.
+  - Sprint boundaries are whole seconds (09:00 UTC). Flooring moves a value onto a boundary `b` only if it lies in `(b, b + 1 ms)`. That flips `> b` into `<= b`: a scope add would become committed, or work resolved just after the end would count as completed. Values exactly on `b` stay on `b`, and every other value keeps its side.
+- **Options considered:**
+  - **Assume it never happens.** It was checked once during planning, but a new seed could break it with nothing to say so.
+  - **Load microseconds into the warehouse.** The API emits milliseconds, so the warehouse cannot know them. That would mean reading `raw_data/` in the pipeline.
+  - **A tolerance in the reconciliation.** It would hide real off-by-one bugs too.
+  - **A check on the raw side** (chosen), with a sabotage case: a value 0.5 ms after a sprint start is caught, and flooring it flips it from scope added to committed.
+- **Why:** it proves, rather than assumes, that the exact reconciliation is not passing by luck, and it fails loudly on the first dataset where it would.
+- **Consequences:**
+  - Shipped data: 13 distinct boundary instants. 0 of 320 `added_at`, 0 of 313 `resolutiondate` and 0 of 1,488 transition timestamps fall in the first millisecond after one. 244 `added_at` values sit exactly on a sprint start (committed at planning), which flooring leaves unchanged.
+  - If the check ever fails, the fix belongs in the contract (for example, emitting microseconds), not in a tolerance.
+- **Source:** `tests/test_metrics.py` (`test_no_raw_timestamp_falls_in_the_first_millisecond_after_a_sprint_boundary`, `test_sabotage_a_value_half_a_millisecond_after_a_boundary_is_caught`).

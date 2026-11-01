@@ -1,0 +1,74 @@
+version: 2
+
+models:
+  - name: rpt_sprint_metrics
+    description: >
+      One row per sprint (grain: sprint_id). Committed, scope added and
+      completed story points from exact instants, the sprint hit, and the bug
+      and issue counts of the sprint's members: every value
+      simulator/sprint_report.py reports, and equal to it for all 36 sprints
+      (tests/test_metrics.py). Members come from fct_sprint_membership.
+      Carries the team and sprint names, so the dashboard needs no join.
+    data_tests:
+      - expected_row_count:
+          arguments:
+            expected: 36
+    columns:
+      - name: sprint_id
+        description: Jira sprint ID. Primary key.
+        data_tests:
+          - unique
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_sprint')
+                field: sprint_id
+      - name: team_id
+        description: Jira project ID of the sprint's team.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_team')
+                field: team_id
+      - name: team_key
+        description: Jira project key of the team (PHX, ATL, NMD).
+        data_tests: [not_null]
+      - name: team_name
+        description: Team (Jira project) name.
+        data_tests: [not_null]
+      - name: sprint_name
+        description: Sprint name as in Jira ("Sprint 1" to "Sprint 12").
+        data_tests: [not_null]
+      - name: sprint_number
+        description: >
+          Position of the sprint in its team's sequence, by start_at (1 = first).
+          A test checks it matches the number in sprint_name.
+        data_tests: [not_null]
+      - name: start_at
+        description: Sprint start instant (09:00 UTC on its start date). Committed vs. scope added is decided against it.
+        data_tests: [not_null]
+      - name: end_at
+        description: Sprint end instant (09:00 UTC on its end date, the next sprint's start). Completed is decided against it.
+        data_tests: [not_null]
+      - name: committed_points
+        description: Story points of member issues whose added_at <= start_at.
+        data_tests: [not_null]
+      - name: scope_added_points
+        description: Story points of member issues whose added_at > start_at (pulled in mid-sprint).
+        data_tests: [not_null]
+      - name: completed_points
+        description: >
+          Story points of member issues resolved at or before end_at, committed
+          and scope-added alike. Work finished after end_at counts nowhere,
+          since v1 has no carryover.
+        data_tests: [not_null]
+      - name: is_hit
+        description: True when completed_points >= committed_points (the answer key's "hit").
+        data_tests: [not_null]
+      - name: bug_count
+        description: Number of member issues of type Bug.
+        data_tests: [not_null]
+      - name: issue_count
+        description: Number of member issues, all types (the answer key's total_count).
+        data_tests: [not_null]

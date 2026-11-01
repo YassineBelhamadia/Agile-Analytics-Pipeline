@@ -44,10 +44,13 @@ DIMENSIONS = {"dim_team": 3, "dim_user": 12, "dim_sprint": 36, "dim_issue": 530}
 FACTS = {"fct_status_transitions": 1488, "fct_sprint_membership": 320, "fct_capacity": 36}
 
 
-def run_dbt(tmp_path: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+def run_dbt(
+    tmp_path: Path, *args: str, env: dict[str, str] | None = None, project_dir: Path = DBT_DIR
+) -> subprocess.CompletedProcess:
+    """`project_dir` is for sabotage runs on a modified copy of dbt/; the real project is never edited."""
     command = [
         str(DBT), *args,
-        "--project-dir", str(DBT_DIR), "--profiles-dir", str(DBT_DIR), "--log-path", str(tmp_path / "logs"),
+        "--project-dir", str(project_dir), "--profiles-dir", str(project_dir), "--log-path", str(tmp_path / "logs"),
     ]
     if args[0] != "debug":  # debug takes neither
         command += ["--target-path", str(tmp_path / "target"), "--vars", VARS]
@@ -169,6 +172,7 @@ def test_dbt_never_writes_outside_the_test_schemas(warehouse, tmp_path: Path) ->
     models = [n for n in manifest["nodes"].values() if n["resource_type"] == "model"]
     assert {n["schema"] for n in models if n["fqn"][1] == "staging"} == {STG}
     assert {n["schema"] for n in models if n["fqn"][1] == "marts"} == {MARTS}
+    assert {n["schema"] for n in models if n["fqn"][1] == "metrics"} == {MARTS}
     assert {n["schema"] for n in models} == {STG, MARTS}
     assert {s["schema"] for s in manifest["sources"].values()} == {TEST_SCHEMA}
 

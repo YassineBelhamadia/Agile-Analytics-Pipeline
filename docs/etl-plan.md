@@ -5,7 +5,7 @@ This plan lists every commit for ETL Sessions 2 to 5. Each step gives its ID, sc
 Rules for this file:
 
 - **Messages are verbatim.** A step's commit message is used exactly as written here. If it no longer fits the change, stop and ask. Do not edit it on the fly.
-- **Provisional steps.** Sessions 4 and 5 are outlines (Session 3 was detailed and confirmed on 2026-10-31). Their messages are *provisional, finalized at session start*, and each of those sessions is detailed in this file (scope, files, gates, final messages) and confirmed before work begins.
+- **Provisional steps.** Session 5 is an outline (Session 3 was detailed and confirmed on 2026-10-31, Session 4 on 2026-11-01). Its messages are *provisional, finalized at session start*, and the session is detailed in this file (scope, files, gates, final messages) and confirmed before work begins.
 - **Format.** Conventional Commits with type `feat`, `fix`, `refactor`, `docs`, `chore`, `test` or `ci`. The subject is 72 characters or fewer, then a blank line, then a 1–3 line body. Never mention Claude, and never add co-author or session trailers. `.githooks/commit-msg` enforces this ([`workflow.md`](workflow.md#hooks)).
 - **Targets.** Counts come from the shipped dataset (SEED=22) in [`CLAUDE.md`](../CLAUDE.md#shipped-dataset-seed22-verification-targets).
 
@@ -19,9 +19,9 @@ Rules for this file:
 | 3.2 | 3 | `feat(dbt): add team, user, sprint and issue dimensions` | done |
 | 3.3 | 3 | `feat(dbt): add status transition fact and capacity model` | done |
 | 3.4 | 3 | `test(dbt): add relationship and data quality tests` | done |
-| 4.1 | 4 | `feat(metrics): add sprint metrics reconciled with sprint_report` | provisional |
-| 4.2 | 4 | `feat(metrics): add business question models 1 to 3` | provisional |
-| 4.3 | 4 | `feat(metrics): add business question models 4 to 6` | provisional |
+| 4.1 | 4 | `feat(metrics): add sprint metrics reconciled with sprint_report` | done |
+| 4.2 | 4 | `feat(metrics): add business question models 1 to 3` | planned |
+| 4.3 | 4 | `feat(metrics): add business question models 4 to 6` | planned |
 | 5.1 | 5 | `feat(pipeline): add one-command pipeline run` | provisional |
 | 5.2 | 5 | `test(pipeline): add pytest wrappers for verify scripts` | provisional |
 | 5.3 | 5 | `ci: add GitHub Actions workflow` | provisional |
@@ -292,33 +292,86 @@ Adds row-count, non-Epic story point and one-team-per-user tests, plus a check t
 
 **Final report after 3.4:** a summary table of the four commits, the final counts in `marts`, and what Session 4 (metrics) can rely on.
 
-## Session 4: metrics and business questions (outline, to be detailed before the session starts)
+## Session 4: metrics and business questions
 
-Branch: `feat/etl-session-4`. Commit messages below are *provisional, finalized at session start*.
+Branch: `feat/etl-session-4`. Detailed and confirmed at session start (2026-11-01). At most 4 commits. Stop for Yassine's review after step 4.1 and after step 4.3. Stage page: [`etl/04-metrics.md`](etl/04-metrics.md); one page per business question in [`metrics/`](metrics/).
 
-Metrics are SQL models in dbt, not Python.
+### Spec (applies to all three steps)
 
-- **4.1:** committed, scope added and completed per sprint, from exact timestamps (never calendar days).
-  - Must match `simulator/sprint_report.py` exactly for all 36 sprints, checked by a small pytest.
-  - This is the answer key and is never cut. A mismatch is a bug in one of the two, never a rounding detail.
-  - Checked during planning: in the shipped data, no `added_at` or `resolutiondate` falls within 1 ms after a sprint boundary. So the API's millisecond truncation cannot flip any committed/scope-added or completed comparison.
-  - `feat(metrics): add sprint metrics reconciled with sprint_report`
-- **4.2 and 4.3:** the six business questions:
-  1. velocity per sprint;
-  2. velocity vs. capacity;
-  3. deadline breach rate by issue type;
-  4. time per status;
-  5. bug-to-story ratio;
-  6. cross-team comparison.
+Decisions already made at session start. Each is recorded, with the options considered, in [`decisions.md`](decisions.md) (D-033 onwards).
 
-  Epics are excluded from time-based metrics.
-  - `feat(metrics): add business question models 1 to 3`
-  - `feat(metrics): add business question models 4 to 6`
+- **Where.** Metrics are SQL models in dbt, in `dbt/models/metrics/`, built as tables in schema `marts`. They follow the naming and test conventions already in `dbt/` ([D-033](decisions.md#d-033-metrics-are-dbt-sql-models-built-as-tables-in-marts)).
+- **Exact timestamps, never calendar days.** Committed is `added_at <= dim_sprint.start_at`, scope added is `added_at > start_at`, completed is `dim_issue.resolved_at <= dim_sprint.end_at`. Which issues belong to a sprint comes from `fct_sprint_membership`. `complete_at` is not used.
+- **The answer key.** The warehouse must match `simulator/sprint_report.py` exactly for all 36 sprints. A mismatch is a bug in one side, never a rounding detail. `sprint_report.py` is never edited to make a check pass.
+- **Millisecond floor.** Warehouse timestamps are floored to milliseconds ([D-024](decisions.md#d-024-reconciliation-truncates-raw-timestamps-to-milliseconds)). A check shows that no relevant raw timestamp falls within the first millisecond after a sprint boundary, where flooring could flip a comparison. The result is documented.
+- **Breach rate.** The headline counts resolved issues only, matching the answer key: Story 20.4%, Task 28.9%, Bug 38.8%. A separate "open and overdue" count is measured at the last data timestamp, derived from the data and never hardcoded. The deadline rule is the one in [`domain-model.md`](domain-model.md).
+- **Bug-to-story ratio** counts all created issues, because 180 non-Epic issues never join a sprint.
+- **Time-based metrics** exclude Epics. Durations are in calendar hours (weekends included), and that limit is documented.
+- **v1 limits in the metric docs:** no carryover (66 issues finish after their own sprint ends, which explains part of the breach rate and makes velocity read lower than real throughput), one team per user, scope creep not scaled to team size.
+- **Tidy outputs for the dashboard.** Every business-question model has a documented grain, carries the team name and the sprint name or number, and needs no further join in the BI tool. Every model and column has a description in its dbt `schema.yml`.
+- **Independent checks.** Expected values are recomputed in plain Python from `raw_data/`, never through the pipeline's code or the mock API. Every step has at least one sabotage check. Postgres tests build into `marts_test`, as in Session 3.
 
-Decisions already made:
+### Step 4.1: sprint metrics reconciled with `sprint_report`
 
-- **Breach headline.** The breach rate headline counts resolved issues only, matching the answer key: Story 20.4%, Task 28.9%, Bug 38.8%. A separate "open and overdue" count is measured at the last data timestamp, 2024-07-05 15:35:28. Breach is split by committed vs. scope-added ([`domain-model.md`](domain-model.md), "Deadline (duedate) rule").
-- **Bug-to-story ratio.** It counts all created issues, because 180 non-Epic issues never join a sprint.
+- **Scope.** A per-sprint model with committed, scope added and completed story points from exact timestamps, plus every other value the answer key reports, and a pytest that reconciles all 36 sprints with `sprint_report.py`.
+- **Expected files.**
+  - `dbt/dbt_project.yml`, `dbt/models/metrics/rpt_sprint_metrics.sql`, `dbt/models/metrics/_metrics__sprint.yml`, two singular tests in `dbt/tests/`
+  - `tests/test_metrics.py`, `tests/test_dbt.py` (`run_dbt` takes a project directory, for sabotage copies)
+  - `docs/etl/04-metrics.md`, `docs/etl/README.md`, `docs/etl-plan.md` (this section), `docs/decisions.md`, `CLAUDE.md`
+- **Gate.**
+  - Committed, scope added and completed match `sprint_report.py` for all 36 sprints, on every value it reports, including `hit` and the bug and issue counts.
+  - The reconciliation reads the expected values by calling the answer key on `raw_data/`, and the warehouse values from the marts layer.
+  - Sabotage: calendar days instead of exact timestamps (the original off-by-one-day bug) fail the reconciliation on at least one sprint.
+  - The sub-millisecond boundary check passes, with its own sabotage.
+- **Commit message:**
+
+```
+feat(metrics): add sprint metrics reconciled with sprint_report
+
+Adds a per-sprint model with committed, scope added and completed story points from exact timestamps, plus a pytest that reconciles all 36 sprints with sprint_report.py.
+```
+
+### Step 4.2: business questions 1 to 3
+
+- **Scope.**
+  - Q1: velocity per team and sprint, with a 3-sprint rolling average.
+  - Q2: velocity against available capacity, using the capacity definitions in the docs. If they are ambiguous, stop and ask.
+  - Q3: breach rate by issue type, and by team, plus the open-and-overdue count.
+- **Gate.**
+  - Q3 reproduces 20.4%, 28.9% and 38.8% on resolved issues.
+  - All three questions are recomputed independently in plain Python from `raw_data/` and compared.
+  - Sabotage per question, for example a flipped breach comparison failing the rates and the test.
+- **Docs.** One short page per question in `docs/metrics/` (`q1-velocity.md`, `q2-velocity-vs-capacity.md`, `q3-breach-rate.md`): the question in plain words, the formula and data used, the assumptions, how it was verified, and an example result.
+- **Commit message:**
+
+```
+feat(metrics): add business question models 1 to 3
+
+Adds velocity per sprint, velocity against capacity and deadline breach rate by issue type, each with an independent check against raw_data.
+```
+
+### Step 4.3: business questions 4 to 6
+
+- **Scope.**
+  - Q4: time per status. Each stay in a status lasts from the transition into it (or creation, for the first status) to the next transition. A bounce back to an earlier status is another visit. Epics are excluded. The treatment of the still-open final stay of unresolved issues is stated and justified. Mean, median and 90th percentile by status and team.
+  - Q5: bug-to-story ratio by team over time, at a time grain chosen from the data's span and justified.
+  - Q6: one row per team combining velocity, capacity use, breach rate, time per status, bug-to-story ratio and the sprint hit rate, normalized fairly (per available person-day where applicable), with the normalization limits documented.
+- **Gate.**
+  - Q4 and Q5 are recomputed independently from `raw_data/` and match.
+  - Q6 equals the corresponding values from Q1 to Q5, team by team.
+  - Sabotage per question, as in 4.2.
+- **Docs.** `docs/metrics/q4-time-per-status.md`, `q5-bug-to-story.md`, `q6-portfolio.md` in the same format, plus `docs/metrics/README.md` as an index.
+- **Commit message:**
+
+```
+feat(metrics): add business question models 4 to 6
+
+Adds time per status, bug-to-story ratio and the cross-team portfolio comparison, each with an independent check against raw_data.
+```
+
+**Spare (4th) commit:** only if a gate needs a follow-up fix, with a Conventional Commits message and the reason given in the report.
+
+**Final report after 4.3:** a table of the commits; the key results (the 36-sprint reconciliation, the three breach rates, a one-line headline per question); what the dashboard layer can rely on (model names, grains, columns); every assumption made.
 
 ## Session 5: pipeline, tests, CI, docs (outline, to be detailed before the session starts)
 

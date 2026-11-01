@@ -25,3 +25,7 @@ models:
     marts:
       +schema: marts
       +materialized: table
+    # Session 4 metrics and business-question models: also tables in marts (D-033).
+    metrics:
+      +schema: marts
+      +materialized: table
