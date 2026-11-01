@@ -57,8 +57,8 @@ defensible in an interview, including the options we rejected.
 - No `priority` field in v1, on purpose (see domain-model.md).
 - `duedate` is set when an issue first joins a sprint, by an authored policy that is never tuned;
   Epics and never-scheduled issues stay null. Rule: domain-model.md, "Deadline (duedate) rule".
-- Breach (business question 3): issues with a duedate only, as defined in that same section.
-  Report resolved-only and incl. past due, and split by committed vs. scope-added.
+- Breach (business question 3): issues with a duedate only, as defined in that same section. As-of = last event (D-036).
+  Report resolved-only (Story 20.4%, Task 28.9%, Bug 38.8%) and incl. past due, split by committed vs. scope-added.
 - Every request needs an `Authorization` header (Basic or Bearer, any non-empty value).
 - `GET /capacity`: our own schema, not Jira's (snake_case, full-precision `pto_days`, agile-style
   paging, `team`/`sprint` filters, 36 rows). Contract: docs/mock-api.md section 11.
@@ -115,7 +115,7 @@ counts must match these. Staging also equals raw_data/ row by row (raw timestamp
 1. Session 1: capacity endpoint, Postgres in Docker, extraction client (done)
 2. Session 2: parsing and staging tables (done, on `feat/etl-session-2`)
 3. Session 3: dbt star schema (done, on `feat/etl-session-3`; docs/etl/03-dbt-star-schema.md)
-4. Session 4: sprint metrics and the six business questions (in progress on `feat/etl-session-4`; 4.1 done; docs/etl/04-metrics.md)
+4. Session 4: sprint metrics and the six business questions (in progress on `feat/etl-session-4`; 4.1-4.2 done; docs/metrics/)
 5. Session 5: one-command pipeline, tests, CI, docs, clean run from an empty database
 
 If behind schedule, cut in this order: GitHub Actions, date dimension, docs polish. Never cut the reconciliation against `sprint_report.py`.

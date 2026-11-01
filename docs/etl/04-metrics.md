@@ -3,7 +3,10 @@
 Status: in progress (Session 4, [`../etl-plan.md`](../etl-plan.md)).
 
 - **Step 4.1** (done): `rpt_sprint_metrics`, reconciled with `simulator/sprint_report.py` for all 36 sprints.
-- **Step 4.2:** business questions 1 to 3. **Step 4.3:** business questions 4 to 6. Each question gets its own page in [`../metrics/`](../metrics/).
+- **Step 4.2** (done): business questions 1 to 3 (velocity, velocity against capacity, breach rate), each recomputed from `raw_data/`.
+- **Step 4.3:** business questions 4 to 6.
+
+Each question has its own page in [`../metrics/`](../metrics/): what it asks, the formula, the assumptions, how it was verified, and an example result.
 
 ## Purpose
 
@@ -11,9 +14,9 @@ Turns the star schema ([03-dbt-star-schema.md](03-dbt-star-schema.md)) into the 
 
 ## Inputs and outputs
 
-**Inputs:** `dim_team`, `dim_sprint`, `dim_issue` and `fct_sprint_membership` in `marts`.
+**Inputs:** the star schema in `marts` (`dim_team`, `dim_sprint`, `dim_issue`, `fct_sprint_membership`, `fct_status_transitions`, `fct_capacity`), and the dbt var `sprint_working_days` (10).
 
-**Outputs:** `marts.rpt_sprint_metrics`, a table replaced by every `dbt build` or `dbt run`. The models live in `dbt/models/metrics/`, which `dbt_project.yml` builds into `marts`.
+**Outputs:** tables in `marts`, replaced by every `dbt build` or `dbt run`. The models live in `dbt/models/metrics/`, which `dbt_project.yml` builds into `marts`.
 
 ## Schema or contract
 
@@ -34,6 +37,18 @@ Turns the star schema ([03-dbt-star-schema.md](03-dbt-star-schema.md)) into the 
 | `is_hit` | boolean | `completed_points >= committed_points` |
 | `bug_count` | bigint | member issues of type Bug |
 | `issue_count` | bigint | member issues, all types |
+
+### Business-question models
+
+Every model carries the team name, and the sprint name and number where its grain has a sprint. Each needs no further join. Each model and column is described in `dbt/models/metrics/_metrics__*.yml`.
+
+| Model | Question | Grain | Rows (SEED=22) | Page |
+|---|---|---|---|---|
+| `rpt_data_as_of` | helper | one row: the last event instant | 1 | [q3](../metrics/q3-breach-rate.md) |
+| `rpt_q1_velocity` | Q1 velocity | sprint | 36 | [q1-velocity.md](../metrics/q1-velocity.md) |
+| `rpt_q2_velocity_vs_capacity` | Q2 velocity against capacity | sprint | 36 | [q2-velocity-vs-capacity.md](../metrics/q2-velocity-vs-capacity.md) |
+| `rpt_q3_deadline_outcomes` | Q3 detail | issue with a due date | 320 | [q3-breach-rate.md](../metrics/q3-breach-rate.md) |
+| `rpt_q3_breach_rate` | Q3 breach rate | team × issue type × commitment, with "All" rollups | 48 | [q3-breach-rate.md](../metrics/q3-breach-rate.md) |
 
 ### The definitions in plain words
 
@@ -78,11 +93,20 @@ uv run --env-file .env python -m pytest tests/test_metrics.py -rs         # reco
 
 ### dbt tests on `rpt_sprint_metrics`
 
-20 tests, run by `dbt build` (94 data tests in the project in all, 74 before this step):
+Step 4.1 added 20 tests (94 data tests in the project then, 74 before):
 
 - `unique` and `not_null` on `sprint_id`, `not_null` on every column, `relationships` to `dim_sprint` and `dim_team`, and `expected_row_count` 36.
 - **`assert_sprint_metrics_cover_every_membership`:** the sum of `issue_count` is the membership count, and committed plus scope added is every member's points. A membership counted twice, or in neither branch, fails it.
 - **`assert_sprint_number_matches_sprint_name`:** `sprint_name` is "Sprint " plus `sprint_number`. A sprint out of order, or a gap, fails it.
+
+### dbt tests on the business-question models (step 4.2)
+
+Step 4.2 added 67 tests, for 161 in the project:
+
+- `unique` and `not_null` on every key, `not_null` on every column that is always set, and the row counts above (`rpt_q3_breach_rate` has a `unique_combination` test on its three dimensions instead).
+- `accepted_values` on `issue_type`, `commitment` and `outcome`.
+- **`assert_pto_within_sprint_person_days`:** no capacity row has PTO below 0 or above `headcount × 10`.
+- **`assert_breach_rate_rollups_add_up`:** every rollup row of `rpt_q3_breach_rate` is the sum of its parts along each dimension, and the grand total is all 320 due issues.
 
 ### Reconciliation with the answer key (pytest)
 
@@ -95,6 +119,32 @@ uv run --env-file .env python -m pytest tests/test_metrics.py -rs         # reco
 | `test_sabotage_calendar_days_fail_the_reconciliation` | **Sabotage:** in a copy of the dbt project, the three comparisons become calendar-day comparisons. Each replacement is asserted to happen once, so the sabotage can't silently miss. The reconciliation then differs on exactly 17 sprints. The real project is never edited. |
 | `test_no_raw_timestamp_falls_in_the_first_millisecond_after_a_sprint_boundary` | The millisecond check above: 0 values for each of the three kinds. |
 | `test_sabotage_a_value_half_a_millisecond_after_a_boundary_is_caught` | **Sabotage:** a scope add 0.5 ms after a sprint start is caught by the check, and flooring it would flip it to committed. |
+
+### Business questions against `raw_data/` (pytest, step 4.2)
+
+Same file. The expected side is plain Python on `raw_data/*.json`, without the answer key or any pipeline code. Details and sabotage cases are on each question's page.
+
+| Test | What it proves |
+|---|---|
+| `test_q1_velocity_matches_raw_data` | Q1, all 36 sprints, all columns |
+| `test_q1_late_points_are_the_documented_no_carryover_figures` | 65 issues and 343 points finished after their sprint: 28.1% of all completed |
+| `test_sabotage_q1_a_four_sprint_window_fails` | **Sabotage:** a 4-sprint window makes 27 sprints differ, in the rolling columns only |
+| `test_raw_pto_never_exceeds_the_sprints_person_days` | the PTO rule on the raw side |
+| `test_q2_velocity_vs_capacity_matches_raw_data` | Q2, all 36 sprints, all columns |
+| `test_sabotage_q2_ignoring_pto_fails` | **Sabotage:** capacity without PTO makes all 36 sprints differ |
+| `test_sabotage_pto_above_the_sprints_person_days_fails_the_pto_test` | **Sabotage:** too much PTO fails exactly the PTO test |
+| `test_q3_raw_data_gives_the_documented_headline` | raw data gives 20.4%, 28.9%, 38.8% |
+| `test_q3_breach_rates_match_raw_data_and_the_headline` | Q3, all 320 outcomes, all 48 cells, the as-of instant, and the warehouse headline |
+| `test_sabotage_q3_a_flipped_breach_comparison_fails` | **Sabotage:** a flipped comparison gives 79.6%, 71.1%, 61.2% and changes all 313 resolved outcomes |
+| `test_the_as_of_instant_follows_the_data` | a later event moves the as-of instant ([D-036](../decisions.md#d-036-the-as-of-instant-is-derived-from-the-data)) |
+
+Sabotage runs edit a copy of the dbt project (`sabotaged_project`). Each edited text must occur exactly once, so a sabotage can't silently miss. The real project is never edited.
+
+### Gate run for step 4.2
+
+- **`dbt build`**, real schemas: `PASS=182 WARN=0 ERROR=0` (8 views, 13 tables, 161 data tests).
+- **pytest** `tests/test_metrics.py`: 16 passed, 0 skipped. The full suite and the hooks are in the session report.
+- **Q3 headline** on the real `marts`: Story 20.4%, Task 28.9%, Bug 38.8%. As-of 2024-07-05 15:35:28.261 UTC, 3 issues open and overdue.
 
 ### Gate run for step 4.1
 
@@ -162,3 +212,7 @@ Totals: PHX hit 5 of 12 sprints (581 committed, 105 scope added, 509 completed),
 - **Python metrics, DAX measures, views, a separate schema:** [D-033](../decisions.md#d-033-metrics-are-dbt-sql-models-built-as-tables-in-marts).
 - **Calendar days, `complete_at`, `event_sprint_id`, the Done transition time, a hand-written expected formula:** [D-034](../decisions.md#d-034-sprint-metrics-read-the-membership-fact-and-end_at-reconciled-with-sprint_reportpy).
 - **Assuming the floor is harmless, microseconds in the warehouse, a tolerance:** [D-035](../decisions.md#d-035-the-millisecond-floor-is-checked-at-sprint-boundaries-not-tolerated).
+- **A hardcoded as-of instant, the build's wall clock, the last scheduled sprint end:** [D-036](../decisions.md#d-036-the-as-of-instant-is-derived-from-the-data).
+- **Headcount only, hours, planned PTO:** [D-037](../decisions.md#d-037-available-capacity-is-headcount--10-working-days--pto-days).
+- **A centred window, nulls before three sprints, the mean of ratios:** [D-038](../decisions.md#d-038-rolling-figures-cover-the-sprint-and-the-two-before-it).
+- **Separate by-type and by-team models, rates as DAX measures:** [D-039](../decisions.md#d-039-breach-rates-ship-as-a-table-with-labelled-rollups-plus-an-issue-level-table).

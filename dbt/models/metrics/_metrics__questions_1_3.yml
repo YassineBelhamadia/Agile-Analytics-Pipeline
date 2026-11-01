@@ -1,0 +1,253 @@
+version: 2
+
+models:
+  - name: rpt_data_as_of
+    description: >
+      One row: the last instant anything happened in the data (D-036), the
+      latest issue creation, resolution, status transition or sprint join.
+      Derived, never hardcoded. Q3 measures "open and overdue" at it.
+    data_tests:
+      - expected_row_count:
+          arguments:
+            expected: 1
+    columns:
+      - name: as_of_at
+        description: The last event timestamp (UTC, millisecond precision).
+        data_tests: [not_null]
+      - name: as_of_date
+        description: The UTC date of as_of_at. An open issue is overdue when its duedate is before this day.
+        data_tests: [not_null]
+
+  - name: rpt_q1_velocity
+    description: >
+      Q1, velocity per team and sprint. Grain: one row per sprint (sprint_id).
+      Velocity is completed story points (rpt_sprint_metrics), with a 3-sprint
+      rolling average per team. completed_after_end_points shows the
+      no-carryover limit. Page: docs/metrics/q1-velocity.md.
+    data_tests:
+      - expected_row_count:
+          arguments:
+            expected: 36
+    columns:
+      - name: sprint_id
+        description: Jira sprint ID. Primary key.
+        data_tests: [unique, not_null]
+      - name: team_id
+        description: Jira project ID of the sprint's team.
+        data_tests: [not_null]
+      - name: team_key
+        description: Jira project key of the team.
+        data_tests: [not_null]
+      - name: team_name
+        description: Team (Jira project) name.
+        data_tests: [not_null]
+      - name: sprint_name
+        description: Sprint name ("Sprint 1" to "Sprint 12").
+        data_tests: [not_null]
+      - name: sprint_number
+        description: Position of the sprint in its team's sequence (1 = first).
+        data_tests: [not_null]
+      - name: start_at
+        description: Sprint start instant (09:00 UTC).
+        data_tests: [not_null]
+      - name: end_at
+        description: Sprint end instant (09:00 UTC, the next sprint's start).
+        data_tests: [not_null]
+      - name: velocity_points
+        description: Story points of the sprint's members resolved at or before end_at (the answer key's "completed").
+        data_tests: [not_null]
+      - name: velocity_rolling_3
+        description: >
+          Mean velocity_points of this sprint and the two before it in the same
+          team. Sprints 1 and 2 average the sprints that exist (see sprints_in_window).
+        data_tests: [not_null]
+      - name: sprints_in_window
+        description: Number of sprints in the rolling window, 1 to 3. Below 3 only for sprints 1 and 2.
+        data_tests: [not_null]
+      - name: completed_after_end_points
+        description: >
+          Story points of the sprint's members resolved after end_at. They count
+          in no sprint's velocity, because v1 has no carryover.
+        data_tests: [not_null]
+      - name: completed_after_end_issues
+        description: Number of the sprint's members resolved after end_at.
+        data_tests: [not_null]
+
+  - name: rpt_q2_velocity_vs_capacity
+    description: >
+      Q2, velocity against available capacity. Grain: one row per sprint
+      (sprint_id). Available person-days = headcount x 10 working days - PTO
+      days (D-037). Page: docs/metrics/q2-velocity-vs-capacity.md.
+    data_tests:
+      - expected_row_count:
+          arguments:
+            expected: 36
+    columns:
+      - name: sprint_id
+        description: Jira sprint ID. Primary key.
+        data_tests: [unique, not_null]
+      - name: team_id
+        description: Jira project ID of the sprint's team.
+        data_tests: [not_null]
+      - name: team_key
+        description: Jira project key of the team.
+        data_tests: [not_null]
+      - name: team_name
+        description: Team (Jira project) name.
+        data_tests: [not_null]
+      - name: sprint_name
+        description: Sprint name ("Sprint 1" to "Sprint 12").
+        data_tests: [not_null]
+      - name: sprint_number
+        description: Position of the sprint in its team's sequence (1 = first).
+        data_tests: [not_null]
+      - name: start_at
+        description: Sprint start instant (09:00 UTC).
+        data_tests: [not_null]
+      - name: end_at
+        description: Sprint end instant (09:00 UTC).
+        data_tests: [not_null]
+      - name: headcount
+        description: People on the team this sprint, from /capacity. Null (failing the test) if the sprint has no capacity row.
+        data_tests: [not_null]
+      - name: pto_days
+        description: Person-days of PTO taken by the team this sprint, full precision, from /capacity.
+        data_tests: [not_null]
+      - name: available_person_days
+        description: headcount x 10 (the var sprint_working_days) - pto_days.
+        data_tests: [not_null]
+      - name: completed_points
+        description: Velocity, the story points completed in the sprint (rpt_sprint_metrics).
+        data_tests: [not_null]
+      - name: points_per_person_day
+        description: completed_points / available_person_days.
+        data_tests: [not_null]
+      - name: points_per_person_day_rolling_3
+        description: >
+          Capacity-weighted rolling figure: completed points summed over this
+          sprint and the two before it, divided by their summed available person-days.
+        data_tests: [not_null]
+      - name: sprints_in_window
+        description: Number of sprints in the rolling window, 1 to 3.
+        data_tests: [not_null]
+
+  - name: rpt_q3_deadline_outcomes
+    description: >
+      Q3 detail. Grain: one row per issue with a due date (issue_id), with its
+      deadline outcome at the as-of instant, its team, the sprint that set the
+      due date, and whether it was committed or scope-added. Issues without a
+      duedate (Epics, never-scheduled issues) are excluded by the deadline rule.
+      Page: docs/metrics/q3-breach-rate.md.
+    data_tests:
+      - expected_row_count:
+          arguments:
+            expected: 320
+    columns:
+      - name: issue_id
+        description: Jira issue ID. Primary key.
+        data_tests: [unique, not_null]
+      - name: issue_key
+        description: Jira issue key.
+        data_tests: [not_null]
+      - name: issue_type
+        description: Story, Task or Bug. Epics never have a due date.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [Story, Task, Bug]
+      - name: team_id
+        description: Jira project ID of the issue's sprint's team.
+        data_tests: [not_null]
+      - name: team_key
+        description: Jira project key of the team.
+        data_tests: [not_null]
+      - name: team_name
+        description: Team (Jira project) name.
+        data_tests: [not_null]
+      - name: sprint_id
+        description: The first sprint the issue joined, which set its due date. Null (failing the test) if it has a duedate but no sprint.
+        data_tests: [not_null]
+      - name: sprint_name
+        description: Name of that sprint.
+        data_tests: [not_null]
+      - name: sprint_number
+        description: Position of that sprint in its team's sequence.
+        data_tests: [not_null]
+      - name: commitment
+        description: committed (joined at or before the sprint start) or scope_added (joined after it).
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [committed, scope_added]
+      - name: duedate
+        description: The issue's due date (a date, no time).
+        data_tests: [not_null]
+      - name: resolved_at
+        description: Resolution instant, null while unresolved.
+      - name: resolved_date
+        description: UTC date of resolved_at, compared with duedate.
+      - name: outcome
+        description: >
+          late (resolved_date > duedate), on_time (resolved_date <= duedate),
+          open_overdue (unresolved, duedate before as_of_date), open_not_due
+          (unresolved, not yet due; in no rate).
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [late, on_time, open_overdue, open_not_due]
+      - name: as_of_at
+        description: The instant open issues are measured at (rpt_data_as_of).
+        data_tests: [not_null]
+
+  - name: rpt_q3_breach_rate
+    description: >
+      Q3, deadline breach rate. Grain: one row per team_name x issue_type x
+      commitment, plus rollup rows labelled "All teams", "All types" and "All".
+      The headline by issue type is team_name = 'All teams' and commitment =
+      'All'. Rollup rows are totals: never sum across them. Combinations with
+      no due issue have no row. Page: docs/metrics/q3-breach-rate.md.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [team_name, issue_type, commitment]
+    columns:
+      - name: team_name
+        description: Team name, or "All teams".
+        data_tests: [not_null]
+      - name: team_key
+        description: Jira project key, or "ALL".
+        data_tests: [not_null]
+      - name: issue_type
+        description: Story, Task, Bug, or "All types".
+        data_tests: [not_null]
+      - name: commitment
+        description: committed, scope_added, or "All".
+        data_tests: [not_null]
+      - name: due_issue_count
+        description: Issues with a due date in this cell, every outcome.
+        data_tests: [not_null]
+      - name: resolved_count
+        description: Resolved issues (on_time + late).
+        data_tests: [not_null]
+      - name: on_time_count
+        description: Resolved on or before the due date.
+        data_tests: [not_null]
+      - name: late_count
+        description: Resolved after the due date.
+        data_tests: [not_null]
+      - name: open_overdue_count
+        description: Unresolved at the as-of instant, with a due date before that day.
+        data_tests: [not_null]
+      - name: open_not_due_count
+        description: Unresolved and not yet due. Censored; in no rate.
+        data_tests: [not_null]
+      - name: breach_rate_resolved
+        description: The headline, late_count / resolved_count (0 to 1). Null when nothing was resolved.
+      - name: breach_rate_incl_overdue
+        description: (late_count + open_overdue_count) / (resolved_count + open_overdue_count). Null when both are 0.
+      - name: as_of_at
+        description: The instant open issues are measured at (rpt_data_as_of).
+        data_tests: [not_null]

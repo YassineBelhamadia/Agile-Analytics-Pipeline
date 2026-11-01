@@ -250,7 +250,7 @@ The narrative record of the early project decisions, with the full argument for 
 - **Date:** 2026-10-23
 - **Decision:**
   - Breach headline: resolved issues only. Story 20.4%, Task 28.9%, Bug 38.8% (answer key).
-  - A separate open-and-overdue count at the last data timestamp, 2024-07-05 15:35:28.
+  - A separate open-and-overdue count at the last data timestamp, derived from the data on every build, never hardcoded ([D-036](#d-036-the-as-of-instant-is-derived-from-the-data), amended 2026-11-01).
   - The bug-to-story ratio counts all created issues.
 - **Context:** 180 non-Epic issues never join a sprint.
 - **Options considered:** for the ratio, sprint-scoped vs. all created issues.
@@ -600,3 +600,80 @@ The narrative record of the early project decisions, with the full argument for 
   - Shipped data: 13 distinct boundary instants. 0 of 320 `added_at`, 0 of 313 `resolutiondate` and 0 of 1,488 transition timestamps fall in the first millisecond after one. 244 `added_at` values sit exactly on a sprint start (committed at planning), which flooring leaves unchanged.
   - If the check ever fails, the fix belongs in the contract (for example, emitting microseconds), not in a tolerance.
 - **Source:** `tests/test_metrics.py` (`test_no_raw_timestamp_falls_in_the_first_millisecond_after_a_sprint_boundary`, `test_sabotage_a_value_half_a_millisecond_after_a_boundary_is_caught`).
+
+## D-036: The as-of instant is derived from the data
+
+- **Date:** 2026-11-01
+- **Decision:**
+  - `marts.rpt_data_as_of` holds one row: the latest issue creation, issue resolution, status transition or sprint join.
+  - Q3 measures "open and overdue" at its date.
+  - It is recomputed on every build, and no document or model hardcodes it. This amends [D-020](#d-020-breach-headline-is-resolved-only-bug-to-story-ratio-counts-all-created-issues), which quoted a fixed value.
+- **Context:** an unresolved issue is overdue only relative to a point in time. The data has no "now" of its own, and a fixed date would silently go stale with a new seed or a longer run.
+- **Options considered:**
+  - **A hardcoded instant** (D-020's 2024-07-05 15:35:28). Correct today, wrong for any other dataset.
+  - **The wall-clock time of the build.** Every open issue would become overdue years after the simulated period.
+  - **The last sprint's scheduled `end_at`** (2024-07-08 09:00). It is a plan, not an event: nothing happened after the Friday 15:35 event, and four issues due on 2024-07-05 would turn overdue over a weekend with no work in the data.
+  - **The latest event timestamp** (chosen).
+- **Why:** the as-of instant should be the moment the data describes, and moving one event moves it (`test_the_as_of_instant_follows_the_data`).
+- **Consequences:**
+  - Shipped data: 2024-07-05 15:35:28.261 UTC (the raw 15:35:28.261283, floored to the millisecond, D-024). 3 issues are open and overdue, 4 open and not yet due.
+  - Q4's still-open stays (step 4.3) can use the same instant.
+- **Source:** `dbt/models/metrics/rpt_data_as_of.sql`; [`metrics/q3-breach-rate.md`](metrics/q3-breach-rate.md).
+
+## D-037: Available capacity is headcount × 10 working days − PTO days
+
+- **Date:** 2026-11-01
+- **Decision:**
+  - Q2's available person-days = `headcount × 10 − pto_days`, with 10 as the dbt var `sprint_working_days`.
+  - Velocity is divided by it.
+  - A dbt test fails any capacity row with PTO below 0 or above `headcount × 10`.
+- **Context:** `/capacity` serves `headcount` and `pto_days` but no capacity figure, and the docs gave no formula. Yassine chose this one at the 4.1 review, on condition that it matches how the simulator itself turns headcount and PTO into capacity.
+- **Options considered:**
+  - **Headcount only.** It ignores the absence the data was built to show.
+  - **Hours** (`× 8`). The same ratio scaled by 8, in a unit `/capacity` doesn't use.
+  - **Planned PTO** (`average_pto_days_per_sprint`). This is what the simulator plans with, but it is a simulator parameter, absent from the API and the warehouse.
+  - **Person-days with actual PTO** (chosen).
+- **Why:**
+  - Checked read-only in `simulator/sprint_cycle.py`: the simulator sizes commitment from `headcount × SPRINT_LENGTH_HOURS − pto × WORK_HOURS_PER_DAY`, where `SPRINT_LENGTH_HOURS = 8 × 10`. That is the same formula in hours, with the same 10 working days.
+  - The simulator plans on *average* PTO, while the PTO it records is the PTO drawn for the sprint. Q2 uses the recorded value, which is what "available" means.
+- **Consequences:**
+  - Points per person-day reflects the realization factor divided by the hours a point costs, so it compares a team with itself, not teams with each other ([`metrics/q2-velocity-vs-capacity.md`](metrics/q2-velocity-vs-capacity.md)).
+  - The drawn PTO can partly fall in the next sprint (the absence starts at a random point). Q2 charges it all to the sprint it was recorded for.
+- **Source:** `dbt/models/metrics/rpt_q2_velocity_vs_capacity.sql`, `dbt/tests/assert_pto_within_sprint_person_days.sql`, `dbt/dbt_project.yml`.
+
+## D-038: Rolling figures cover the sprint and the two before it
+
+- **Date:** 2026-11-01
+- **Decision:**
+  - The 3-sprint rolling figures cover the current sprint and the two before it, in the same team, by sprint number.
+  - Sprints 1 and 2 use the sprints that exist, and a `sprints_in_window` column says how many.
+  - Q1 averages velocity. Q2 divides summed points by summed person-days (capacity-weighted).
+- **Context:** the rolling average is a trend line for the dashboard, and a team has only 12 sprints.
+- **Options considered:**
+  - **A centred window** (the sprint before and the sprint after). It uses the future, so it is not usable as a running trend.
+  - **Null until three sprints exist.** It hides a sixth of each chart, while the column already says how full the window is.
+  - **For Q2, the mean of the three ratios.** It gives a short-staffed sprint the same weight as a full one.
+- **Why:** a trailing window is what a team sees at its retrospective. Exposing the window size lets the dashboard filter to full windows instead of the model deciding.
+- **Consequences:** the first two rolling values are less stable. Filter on `sprints_in_window = 3` for full windows.
+- **Source:** `dbt/models/metrics/rpt_q1_velocity.sql`, `rpt_q2_velocity_vs_capacity.sql`.
+
+## D-039: Breach rates ship as a table with labelled rollups, plus an issue-level table
+
+- **Date:** 2026-11-01
+- **Decision:**
+  - `rpt_q3_breach_rate` holds one row per team × issue type × commitment, built with `group by cube`. Its rollup rows are labelled "All teams", "All types" and "All", and each row carries its outcome counts and both rates.
+  - `rpt_q3_deadline_outcomes` holds one row per issue with a due date, for drill-down.
+  - These replace the two models proposed at 4.1 (`rpt_q3_breach_rate_by_type`, `rpt_q3_breach_rate_by_team`).
+- **Context:**
+  - A rate can't be summed or averaged across groups.
+  - The question asks for breach by issue type and by team, and the domain model asks for it split by commitment.
+  - The dashboard must not recompute anything ([D-033](#d-033-metrics-are-dbt-sql-models-built-as-tables-in-marts)).
+- **Options considered:**
+  - **Two models, by type and by team.** They duplicate the logic, and the commitment split would need a third.
+  - **Issue-level rows only, with rates as DAX measures.** The figures would then live in the BI file and go unreconciled.
+  - **Labelled rollups** (chosen), with a test that every rollup equals the sum of its parts.
+- **Why:** every slice the question needs is a filter on one table, and the headline is one row per type.
+- **Consequences:**
+  - Summing across levels double-counts. The model description and the Q3 page say so.
+  - Cells with no due issue have no row (48 in the shipped data).
+- **Source:** `dbt/models/metrics/rpt_q3_breach_rate.sql`, `rpt_q3_deadline_outcomes.sql`, `dbt/tests/assert_breach_rate_rollups_add_up.sql`.

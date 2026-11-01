@@ -15,6 +15,11 @@ clean-targets: ["target", "logs"]
 flags:
   send_anonymous_usage_stats: false
 
+vars:
+  # Working days in every sprint (docs/domain-model.md, "Fixed sprint length"; the simulator's
+  # SPRINT_LENGTH_HOURS is 10 workdays of 8 hours). Q2's available person-days use it.
+  sprint_working_days: 10
+
 # Schema names are exact (stg, marts), not dbt's default <target schema>_<custom schema>.
 # See macros/generate_schema_name.sql.
 models:

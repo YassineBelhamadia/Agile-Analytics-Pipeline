@@ -20,7 +20,7 @@ Rules for this file:
 | 3.3 | 3 | `feat(dbt): add status transition fact and capacity model` | done |
 | 3.4 | 3 | `test(dbt): add relationship and data quality tests` | done |
 | 4.1 | 4 | `feat(metrics): add sprint metrics reconciled with sprint_report` | done |
-| 4.2 | 4 | `feat(metrics): add business question models 1 to 3` | planned |
+| 4.2 | 4 | `feat(metrics): add business question models 1 to 3` | done |
 | 4.3 | 4 | `feat(metrics): add business question models 4 to 6` | planned |
 | 5.1 | 5 | `feat(pipeline): add one-command pipeline run` | provisional |
 | 5.2 | 5 | `test(pipeline): add pytest wrappers for verify scripts` | provisional |
@@ -337,6 +337,15 @@ Adds a per-sprint model with committed, scope added and completed story points f
   - Q1: velocity per team and sprint, with a 3-sprint rolling average.
   - Q2: velocity against available capacity, using the capacity definitions in the docs. If they are ambiguous, stop and ask.
   - Q3: breach rate by issue type, and by team, plus the open-and-overdue count.
+- **Decided at the 4.1 review:**
+  - Q2 uses available person-days = headcount × 10 − pto_days, after a read-only check that the simulator turns headcount and PTO into capacity the same way ([D-037](decisions.md#d-037-available-capacity-is-headcount--10-working-days--pto-days)).
+  - Q2 outputs, per team and sprint: headcount, PTO days, available person-days, completed points, points per available person-day and the 3-sprint rolling figure. A test checks PTO never exceeds headcount × 10. The Q2 page relates the result to each team's tuned realization factor.
+  - The Q1 page states the points that count in no sprint (343 points, 65 issues) as a share of all completed points.
+  - The hardcoded as-of time in D-020 is replaced by one derived from the data ([D-036](decisions.md#d-036-the-as-of-instant-is-derived-from-the-data)).
+- **Expected files.**
+  - `dbt/models/metrics/`: `rpt_data_as_of`, `rpt_q1_velocity`, `rpt_q2_velocity_vs_capacity`, `rpt_q3_deadline_outcomes`, `rpt_q3_breach_rate`, `_metrics__questions_1_3.yml`; `dbt/dbt_project.yml` (var `sprint_working_days`); two singular tests in `dbt/tests/`
+  - `tests/test_metrics.py`
+  - `docs/metrics/q1-velocity.md`, `q2-velocity-vs-capacity.md`, `q3-breach-rate.md`; `docs/etl/04-metrics.md`, `docs/decisions.md` (D-020 amended, D-036 to D-039), this file, `CLAUDE.md`
 - **Gate.**
   - Q3 reproduces 20.4%, 28.9% and 38.8% on resolved issues.
   - All three questions are recomputed independently in plain Python from `raw_data/` and compared.
