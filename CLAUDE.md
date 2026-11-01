@@ -11,12 +11,11 @@ Audience: employers hiring junior data / analytics engineers. Every design choic
 defensible in an interview, including the options we rejected.
 
 ## Read these first
-- `docs/workflow.md`: sessions, branches, gates, commit format, hooks, permissions
-- `docs/etl-plan.md`: every planned commit with its gate and exact message
+- `README.md`: public overview, headline results, quick start, status
+- `docs/workflow.md`: sessions, branches, gates, commit format, hooks, permissions; `docs/etl-plan.md`: every planned commit, gate and message
 - `docs/decisions.md`: decision log (`decision-log.md` is superseded, kept for history); `docs/etl/`: one page per stage
 - `docs/domain-model.md`: entities, relationships, sprint metric definitions, calibration, v1 limitations
-- `docs/mock-api.md`: endpoints, pagination, what is verified vs. assumed
-- `docs/stack.md`: tool choices, reasons, and what is deferred
+- `docs/mock-api.md`: endpoints, pagination, verified vs. assumed; `docs/stack.md`: tool choices, reasons, what is deferred
 
 ## Repo layout
 - `simulator/`: SimPy simulator, per-team random streams, persistence. Done. Do not touch unless asked.
@@ -122,4 +121,5 @@ If behind schedule, cut in this order: GitHub Actions, date dimension, docs poli
 
 ## Maintaining this file
 Update it whenever a decision, rule, command, phase or verification target changes, in the
-same change that causes it. Keep it at 125 lines or fewer; move detail into `docs/`.
+same change that causes it. When a verification target, test count or project status changes, also update
+the numbers and the status table in `README.md`. Keep it at 125 lines or fewer; move detail into `docs/`.
