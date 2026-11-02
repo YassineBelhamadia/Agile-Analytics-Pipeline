@@ -282,8 +282,8 @@ Generated and gitignored: `raw_data/` (ground truth), `landing/` (raw API pages)
 **Yassine Belhamadia**, final-year master's student. This project is the data engineering deliverable of my internship at ISICOD. I am looking for an end-of-studies internship (PFE) in data engineering or analytics engineering, mainly in France, Germany and Morocco.
 
 - GitHub: [YassineBelhamadia](https://github.com/YassineBelhamadia)
-- LinkedIn: `[TODO: add LinkedIn URL]`
-- Email: `[TODO: add contact email]`
-- Master's programme and university: `[TODO: add]`
+- LinkedIn: `www.linkedin.com/in/belhamadiayassine0220`
+- Email: `yassinebelhamadia28@gmail.com`
+- Master's programme and university: `Universite mohammed V de Rabat - Faculte de science`
 
 License: [MIT](LICENSE).
