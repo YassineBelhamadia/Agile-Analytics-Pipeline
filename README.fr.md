@@ -284,8 +284,8 @@ La documentation détaillée est en anglais.
 **Yassine Belhamadia**, étudiant en dernière année de master. Ce projet est le livrable data engineering de mon stage chez ISICOD. Je recherche un stage de fin d'études (PFE) en data engineering ou en analytics engineering, principalement en France, en Allemagne et au Maroc.
 
 - GitHub : [YassineBelhamadia](https://github.com/YassineBelhamadia)
-- LinkedIn : `[À COMPLÉTER : URL LinkedIn]`
-- E-mail : `[À COMPLÉTER : adresse de contact]`
-- Master et université : `[À COMPLÉTER]`
+- LinkedIn : `www.linkedin.com/in/belhamadiayassine0220`
+- E-mail : `yassinebelhamadia28@gmail.com`
+- Master et université : `Universite mohammed V de Rabat - Faculte de science`
 
 Licence : [MIT](LICENSE).
