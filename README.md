@@ -275,7 +275,7 @@ Generated and gitignored: `raw_data/` (ground truth), `landing/` (raw API pages)
 - **Durations are in calendar hours,** nights and weekends included. There is no date dimension yet.
 - **Full refresh only.** Extraction and staging reload everything, requests are sequential, and the whole landing is parsed in memory.
 
-**Next.** ETL Session 5 ([etl-plan.md](docs/etl-plan.md#session-5-pipeline-tests-ci-docs-outline-to-be-detailed-before-the-session-starts)): one command from an empty database, pytest wrappers, CI and the final docs. Then the Power BI dashboard on the `rpt_` tables. v1.1 candidates named in the docs: carryover, priority-aware queueing, staggered sprint starts.
+**Next.** ETL Session 5 ([etl-plan.md](docs/etl-plan.md#session-5-pipeline-tests-ci-docs)): one command from an empty database, pytest wrappers, CI and the final docs. Then the Power BI dashboard on the `rpt_` tables. v1.1 candidates named in the docs: carryover, priority-aware queueing, staggered sprint starts.
 
 ## About the author
 

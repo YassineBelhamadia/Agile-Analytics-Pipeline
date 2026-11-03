@@ -277,7 +277,7 @@ La documentation détaillée est en anglais.
 - **Les durées sont en heures calendaires,** nuits et week-ends compris. Il n'y a pas encore de dimension date.
 - **Rechargement complet uniquement.** L'extraction et le staging rechargent tout, les requêtes sont séquentielles, et toutes les pages déposées sont lues en mémoire.
 
-**Suite.** La session ETL 5 ([etl-plan.md](docs/etl-plan.md#session-5-pipeline-tests-ci-docs-outline-to-be-detailed-before-the-session-starts)) : une commande unique depuis une base vide, des enveloppes pytest, la CI et la documentation finale. Ensuite, le tableau de bord Power BI sur les tables `rpt_`. Pistes pour une v1.1 citées dans la documentation : le report du travail inachevé, une file d'attente tenant compte des priorités, des démarrages échelonnés en début de sprint.
+**Suite.** La session ETL 5 ([etl-plan.md](docs/etl-plan.md#session-5-pipeline-tests-ci-docs)) : une commande unique depuis une base vide, des enveloppes pytest, la CI et la documentation finale. Ensuite, le tableau de bord Power BI sur les tables `rpt_`. Pistes pour une v1.1 citées dans la documentation : le report du travail inachevé, une file d'attente tenant compte des priorités, des démarrages échelonnés en début de sprint.
 
 ## À propos de l'auteur
 
