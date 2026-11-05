@@ -739,3 +739,69 @@ The narrative record of the early project decisions, with the full argument for 
   - Points are team-relative (a point costs 3.5 to 6 hours across teams), so capacity use is not comparable in effort. The page states this and shows the size of the effect with simulator-only parameters.
   - Changing a Q1 to Q5 definition changes the portfolio with it.
 - **Source:** `dbt/models/metrics/rpt_q6_team_portfolio.sql`; [`metrics/q6-portfolio.md`](metrics/q6-portfolio.md).
+
+## D-043: The pipeline starts the mock API as a subprocess and always stops it
+
+- **Date:** 2026-11-06
+- **Decision:**
+  - `pipeline/run.py` starts `uvicorn` as a subprocess on the host and port of `AAP_API_BASE_URL`, and stops it as soon as extraction ends.
+  - A busy port stops the run with exit 2. It never extracts from a server it did not start.
+  - It waits for an authenticated `GET /rest/agile/1.0/board?maxResults=1` to answer 200, for at most 15 seconds.
+  - The server runs in a context manager. Leaving it for any reason, an exception or Ctrl-C included, sends SIGTERM and, after 10 seconds, SIGKILL.
+  - `raw_data/` is a precondition, not a stage. The pipeline never generates it.
+- **Context:** the one-command run must serve the API itself and must not leave a server running after a failure. The earlier outline listed "generate" as the first stage.
+- **Options considered:**
+  - **`uvicorn` as a subprocess** (chosen). Real HTTP, with the settings a manual run uses, at the cost of a readiness wait and process cleanup.
+  - **In process, with FastAPI's `TestClient`,** as the tests do. No port and no process, but the production run would be the test fixture, and it would never prove the client works over a socket (timeouts, retries, the base URL).
+  - **`uvicorn.Server` in a background thread.** Real HTTP with no second process, but it shares the runner's process, and stopping it cleanly from another thread is harder than terminating a child process.
+  - **Starting it by hand.** Not one command.
+  - **For `raw_data/`: generating it in the run.** The simulator plays the source system, and a pipeline that rebuilds its own source would hide a missing or changed source.
+- **Why:** the production run should take the same path as a manual run, and a child process is the simplest thing to stop reliably.
+- **Consequences:**
+  - The API URL must be a local `http://` URL.
+  - A mock API started by hand must be stopped first.
+  - A fresh clone needs `scripts/generate_raw_data.py` once before the one command.
+- **Source:** `pipeline/mock_api_server.py`, `pipeline/run.py`; [`etl/05-pipeline.md`](etl/05-pipeline.md).
+
+## D-044: The completeness check is its own module and compares counts between adjacent stages
+
+- **Date:** 2026-11-06
+- **Decision:**
+  - `pipeline/completeness.py` runs after each stage of a real run, and raises one error naming the stage, the table and both counts. The run then exits 3.
+  - It compares landing, staging, marts and `rpt_` tables with the stage before, never with fixed numbers.
+  - It counts landed records from the raw JSON with its own code, not `ingestion/parse.py`.
+  - The comparisons are listed in [`etl/05-pipeline.md`](etl/05-pipeline.md#schema-or-contract).
+- **Context:** the tests prove the values are right on their own schemas. Nothing checked that a given production run lost nothing between stages.
+- **Options considered:**
+  - **A separate module called by the runner** (chosen). It cannot share a bug with the code it checks.
+  - **dbt tests.** They can't see `landing/`, and the existing `expected_row_count` tests compare with fixed numbers, not with the previous stage.
+  - **Inside each stage.** The check would use the same parsing as the stage it checks.
+  - **pytest.** Tests run on `staging_test` and `marts_test`, not on the production run.
+- **Why:** it complements the tests: it proves a given run lost nothing, while the tests prove the values are right.
+- **Consequences:**
+  - A different seed still passes, since no dataset number is hardcoded.
+  - `sprint_memberships` equals the landed Sprint items only because v1 has no carryover. A version with carryover changes the rule.
+  - `rpt_q3_breach_rate` is checked through its grand-total row and `rpt_q4_time_in_status` only for being non-empty: their row counts depend on which combinations have data.
+- **Source:** `pipeline/completeness.py`, `tests/test_pipeline.py`.
+
+## D-046: Exit codes by kind of failure, and each stage keeps its own guarantee
+
+- **Date:** 2026-11-06
+- **Decision:**
+  - Exit codes: 0 success, 1 a stage failed, 2 a precondition failed with nothing written, 3 a completeness check failed, 130 interrupted.
+  - A failed stage is not undone beyond its own guarantee: a failed extraction keeps the previous landing, and a failed staging load rolls back. The runner prints what is now stale.
+  - After a completeness failure nothing is rolled back, because that data is what is needed to investigate it.
+- **Context:** a script or a CI log must tell "Postgres is down" from "a row went missing", and a reader must know the state after a failure.
+- **Options considered:**
+  - **Exit codes:** 0 or 1 for everything (can't tell the failures apart); one code per stage (duplicates the message, and every new stage needs a number); one code per kind of failure (chosen).
+  - **State after a failure:**
+    - each stage keeps its own guarantee, and the runner says what is stale (chosen);
+    - roll back every stage, which needs a copy of `landing/`, `staging` and `marts` before each run;
+    - build into a shadow schema and swap it on success. Atomic for the dashboard, but it duplicates the warehouse and changes the schema contract ([D-027](#d-027-two-dbt-layers-with-exact-schema-names-stg-views-and-marts-tables)). A v1.1 candidate.
+- **Why:** the three stages already have guarantees, and the only one that can't be all-or-nothing, dbt, can be stated exactly.
+- **Consequences:**
+  - A failed `dbt build` can leave `marts` mixed. Checked on real failed builds (`tests/test_pipeline.py`), comparing table oids:
+    - A failed model keeps its previous table, as assumed in the plan, and so does everything downstream. On an empty database they don't exist.
+    - The plan's table was incomplete on two points. Models that don't depend on the failure are still rebuilt, even if they run after it. And when a data test fails, the tested model is already rebuilt with this run's rows, and only what is downstream keeps its previous table.
+  - The dashboard should only be refreshed after exit 0.
+- **Source:** `pipeline/run.py`; the failure table in [`etl/05-pipeline.md`](etl/05-pipeline.md#schema-or-contract).

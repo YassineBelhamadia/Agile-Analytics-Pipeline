@@ -5,7 +5,7 @@ This plan lists every commit for ETL Sessions 2 to 5. Each step gives its ID, sc
 Rules for this file:
 
 - **Messages are verbatim.** A step's commit message is used exactly as written here. If it no longer fits the change, stop and ask. Do not edit it on the fly.
-- **Provisional steps.** Session 5 was detailed on 2026-11-03 and is *proposed* until Yassine confirms it (Session 3 was detailed and confirmed on 2026-10-31, Session 4 on 2026-11-01). Its messages are final once confirmed. No session starts before its steps are confirmed.
+- **Confirmed steps.** Session 3 was detailed and confirmed on 2026-10-31, Session 4 on 2026-11-01, Session 5 on 2026-11-06. No session starts before its steps are confirmed.
 - **Format.** Conventional Commits with type `feat`, `fix`, `refactor`, `docs`, `chore`, `test` or `ci`. The subject is 72 characters or fewer, then a blank line, then a 1–3 line body. Never mention Claude, and never add co-author or session trailers. `.githooks/commit-msg` enforces this ([`workflow.md`](workflow.md#hooks)).
 - **Targets.** Counts come from the shipped dataset (SEED=22) in [`CLAUDE.md`](../CLAUDE.md#shipped-dataset-seed22-verification-targets).
 
@@ -22,7 +22,7 @@ Rules for this file:
 | 4.1 | 4 | `feat(metrics): add sprint metrics reconciled with sprint_report` | done |
 | 4.2 | 4 | `feat(metrics): add business question models 1 to 3` | done |
 | 4.3 | 4 | `feat(metrics): add business question models 4 to 6` | done |
-| 5.1 | 5 | `feat(pipeline): add one-command pipeline run with completeness checks` | proposed |
+| 5.1 | 5 | `feat(pipeline): add one-command pipeline run with completeness checks` | done |
 | 5.2 | 5 | `test(pipeline): add pytest wrappers for the mock API verify scripts` | proposed |
 | 5.3 | 5 | `feat(metrics): flag rollup rows in breach rate and time in status` | proposed |
 | 5.4 | 5 | `ci: add GitHub Actions workflow with a Postgres service container` | proposed, first to cut |
@@ -391,7 +391,7 @@ Adds time per status, bug-to-story ratio and the cross-team portfolio comparison
 
 ## Session 5: pipeline, tests, CI, docs
 
-Branch: `feat/etl-session-5`. Detailed on 2026-11-03, **to be confirmed by Yassine before work starts**. Stop for Yassine's review after step 5.1 and after step 5.5. Stage page: [`etl/05-pipeline.md`](etl/05-pipeline.md) (a stub until step 5.1).
+Branch: `feat/etl-session-5`. Detailed on 2026-11-03, confirmed on 2026-11-06. Stage page: [`etl/05-pipeline.md`](etl/05-pipeline.md).
 
 **Goal.** One command takes an empty database to the built and tested `rpt_` tables, checks after each stage that nothing was lost between stages, and is documented well enough that a fresh clone reproduces every documented count. The test suite also covers the mock API's two verification scripts, and CI runs the suite on every push.
 
@@ -415,9 +415,9 @@ Branch: `feat/etl-session-5`. Detailed on 2026-11-03, **to be confirmed by Yassi
 - **No CI.** There is no `.github/` directory.
 - **`docs/etl/05-pipeline.md` is a stub** with empty headings.
 
-### Proposed decisions (D-043 to D-047)
+### Decisions (D-043 to D-047)
 
-Each is recorded in [`decisions.md`](decisions.md), with the options below, by the step named in brackets. Until then they are proposals for Yassine to confirm or change at session start.
+Proposed here and approved on 2026-11-06. Each is recorded in [`decisions.md`](decisions.md) by the step named in brackets.
 
 #### D-043: the pipeline starts the mock API as a subprocess and always stops it (step 5.1)
 
@@ -503,10 +503,11 @@ Each is recorded in [`decisions.md`](decisions.md), with the options below, by t
   | preflight | untouched | untouched | untouched | 2 |
   | mock API start or extraction | previous run's, unchanged (scratch removed) | untouched | untouched | 1 |
   | staging load | this run's | previous rows, rolled back | untouched (now behind `landing/`) | 1 |
-  | `dbt build` | this run's | this run's | mixed: models before the failure rebuilt, the failing model and everything downstream from the previous run (absent on an empty database) | 1 |
+  | `dbt build`, a model fails | this run's | this run's | mixed: the failed model and everything downstream keep their previous tables (absent on an empty database); every other model is rebuilt, including those that run after the failure | 1 |
+  | `dbt build`, a data test fails | this run's | this run's | mixed: the tested model is already rebuilt with this run's rows; everything downstream of it keeps its previous table | 1 |
   | a completeness check | as written by the stages that passed | as written | as written | 3 |
 
-  After a completeness failure nothing is rolled back: the data that failed the check is what is needed to investigate it. The mock API is stopped in every row. The `dbt build` row relies on how dbt-postgres replaces a table (build under a temporary name, then rename). Step 5.1 checks it with a sabotage case before the page states it.
+  After a completeness failure nothing is rolled back: the data that failed the check is what is needed to investigate it. The mock API is stopped in every row. The two `dbt build` rows were checked at step 5.1 on real failed builds, comparing table oids. The assumption that a failed model keeps its previous table held. The original single row was incomplete: it missed that unrelated models still rebuild, and that a failed data test leaves the tested model already rebuilt ([D-046](decisions.md#d-046-exit-codes-by-kind-of-failure-and-each-stage-keeps-its-own-guarantee)).
 
 #### D-047: rollup rows carry an `is_rollup` flag (step 5.3)
 

@@ -85,22 +85,22 @@ Comment lines and the `git commit -v` diff are ignored, as git strips them. Git'
 ### `pre-commit`
 
 - **On `main`:** refuses the commit. Bypass for Yassine's own use: `AAP_ALLOW_MAIN=1 git commit ...`.
-- **Code without docs:** refuses a commit that stages files under `ingestion/`, `warehouse/` or `dbt/` with nothing staged under `docs/`. Bypass: `AAP_SKIP_DOCS_CHECK=1 git commit ...`. If Claude Code ever uses it, it says so in the report.
+- **Code without docs:** refuses a commit that stages files under `ingestion/`, `pipeline/`, `warehouse/` or `dbt/` with nothing staged under `docs/`. Bypass: `AAP_SKIP_DOCS_CHECK=1 git commit ...`. If Claude Code ever uses it, it says so in the report.
 
 Both bypasses print a line when used. They are for Yassine only: Claude Code's permissions refuse any Bash command whose text contains either name. `git commit --no-verify` skips both hooks. Claude Code's permissions deny it.
 
 ### Testing the hooks
 
 ```bash
-sh scripts/test_hooks.sh                 # from the repo root; expect "28 passed, 0 failed", exit 0
-d=$(mktemp -d) && sh scripts/test_hooks.sh "$d"; rmdir "$d"   # sabotage: no hooks, 18 cases fail, exit 1
+sh scripts/test_hooks.sh                 # from the repo root; expect "30 passed, 0 failed", exit 0
+d=$(mktemp -d) && sh scripts/test_hooks.sh "$d"; rmdir "$d"   # sabotage: no hooks, 19 cases fail, exit 1
 ```
 
 The script runs every case in a throwaway repo made with `mktemp`, deleted on exit. That repo ignores global and system git config. The cases cover:
 
 - accepted and rejected messages for each commit-msg rule;
 - commits on `main` with and without `AAP_ALLOW_MAIN=1`;
-- the docs check for `ingestion/`, `warehouse/` and `dbt/`, with and without `AAP_SKIP_DOCS_CHECK=1`.
+- the docs check for `ingestion/`, `pipeline/`, `warehouse/` and `dbt/`, with and without `AAP_SKIP_DOCS_CHECK=1`.
 
 Run it after any change to `.githooks/`.
 

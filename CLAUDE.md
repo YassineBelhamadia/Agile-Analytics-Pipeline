@@ -23,6 +23,7 @@ defensible in an interview, including the options we rejected.
 - `mock_api/`: FastAPI app, Jira-shaped endpoints plus `/capacity`, from `raw_data/`. Done, capacity included.
 - `ingestion/`: `client.py` + `extract.py` land raw pages and `manifest.json` in gitignored `landing/`;
   `parse.py` + `load_staging.py` fill all 8 `staging` tables, reconciled with `raw_data/`. `tests/`: pytest, no server.
+- `pipeline/`: one-command run, mock API subprocess, runtime completeness checks (docs/etl/05-pipeline.md).
 - `warehouse/`: Postgres compose file. `dbt/`: `stg` views, `marts` star schema (natural keys) + `rpt_` metric tables (D-033).
 - `.githooks/` + `.claude/settings.json`: hooks, permissions. `dashboard/`: Power BI, later. `docs/`: source of truth.
 
@@ -82,13 +83,13 @@ counts must match these. Staging also equals raw_data/ row by row (raw timestamp
 
 ## Commands (from repo root; `--env-file .env` wherever credentials are needed)
 - Data / mock API: `uv run python scripts/generate_raw_data.py`; `uv run uvicorn mock_api.app:app --port 8000`
+- Whole pipeline (Postgres up, `raw_data/` generated, API port free): `uv run --env-file .env python -m pipeline.run`.
+  Exit 0 ok, 1 stage failed, 2 precondition (nothing written), 3 completeness check failed, 130 interrupted (D-046).
 - Verify: `uv run python -m mock_api.verify`, `uv run python -m mock_api.verify_app`, `uv run python -m simulator.calibration`
 - Postgres up (postgres:18.6, localhost:5433, credentials from the root `.env`; copy `.env.example`):
   `docker compose --env-file .env -f warehouse/docker-compose.yml up -d --wait`
-- Postgres smoke check: `uv run --env-file .env python scripts/check_warehouse.py` (`--persistence`
-  also restarts the container and checks a row survives); down: compose command with `down`, never `-v`
-- Extract (mock API running; `AAP_API_*` in `.env`, env vars only, D-025):
-  `uv run --env-file .env python -m ingestion.extract` -> `landing/`
+- Postgres smoke check: `uv run --env-file .env python scripts/check_warehouse.py`; down: compose command with `down`, never `-v`
+- Extract (mock API running; `AAP_API_*` in `.env`, env vars only, D-025): `uv run --env-file .env python -m ingestion.extract`
 - Load staging: `uv run --env-file .env python -m ingestion.load_staging` (truncate + reload; `--rebuild` for schema changes)
 - dbt: `uv run --env-file .env dbt build --project-dir dbt --profiles-dir dbt` (or `debug`; dbt also reads `.env` itself, D-026)
 - Tests: `uv run --env-file .env python -m pytest -rs` (Postgres tests skip without `POSTGRES_*`; gates need 0 skipped)
@@ -110,12 +111,11 @@ counts must match these. Staging also equals raw_data/ row by row (raw timestamp
 - Keep reports short: what changed, verification results, what was assumed, what was left out.
 
 ## Current phase: ETL build, target date to be set (steps and gates: `docs/etl-plan.md`)
-0. Session 0: workflow scaffolding (plan, hooks, permissions, docs skeleton)
-1. Session 1: capacity endpoint, Postgres in Docker, extraction client (done)
+0-1. Sessions 0 and 1: workflow scaffolding; capacity endpoint, Postgres in Docker, extraction client (done)
 2. Session 2: parsing and staging tables (done, on `feat/etl-session-2`)
 3. Session 3: dbt star schema (done, on `feat/etl-session-3`; docs/etl/03-dbt-star-schema.md)
 4. Session 4: sprint metrics and the six business questions (done, on `feat/etl-session-4`; docs/metrics/)
-5. Session 5: one-command pipeline, tests, CI, docs, clean run from an empty database (next)
+5. Session 5: one-command pipeline, tests, docs, clean run from an empty database (in progress, on `feat/etl-session-5`)
 
 If behind schedule, cut in this order: GitHub Actions, date dimension, docs polish. Never cut the reconciliation against `sprint_report.py`.
 

@@ -2,8 +2,8 @@
 # pre-commit: branch and documentation guardrails, see docs/workflow.md.
 #
 # 1. Refuses a commit on main. Bypass: AAP_ALLOW_MAIN=1.
-# 2. Refuses a commit that stages files under ingestion/, warehouse/ or
-#    dbt/ without staging anything under docs/. Bypass: AAP_SKIP_DOCS_CHECK=1.
+# 2. Refuses a commit that stages files under ingestion/, pipeline/, warehouse/
+#    or dbt/ without staging anything under docs/. Bypass: AAP_SKIP_DOCS_CHECK=1.
 #
 # Enable once per clone: git config core.hooksPath .githooks
 
@@ -21,7 +21,7 @@ if [ "$branch" = "main" ]; then
 fi
 
 staged=$(git -c core.quotePath=false diff --cached --name-only)
-code=$(printf '%s\n' "$staged" | grep -E '^(ingestion|warehouse|dbt)/')
+code=$(printf '%s\n' "$staged" | grep -E '^(ingestion|pipeline|warehouse|dbt)/')
 docs=$(printf '%s\n' "$staged" | grep -E '^docs/')
 
 if [ -n "$code" ] && [ -z "$docs" ]; then

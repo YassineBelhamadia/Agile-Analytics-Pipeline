@@ -130,7 +130,9 @@ echo "--- pre-commit: docs check"
 check reject "ingestion/ change without docs" commit_file "feat(staging): add loader$BODY" ingestion/load_staging.py
 check reject "warehouse/ change without docs" commit_file "chore(warehouse): tweak$BODY" warehouse/docker-compose.yml
 check reject "dbt/ change without docs" commit_file "feat(dbt): add model$BODY" dbt/models/x.sql
+check reject "pipeline/ change without docs" commit_file "feat(pipeline): add run$BODY" pipeline/run.py
 check accept "ingestion/ change with docs/ staged" commit_file "feat(staging): add loader$BODY" ingestion/load_staging.py docs/etl/02-staging.md
+check accept "pipeline/ change with docs/ staged" commit_file "feat(pipeline): add run$BODY" pipeline/run.py docs/etl/05-pipeline.md
 check accept "change outside the guarded folders" commit_file "test(staging): add test$BODY" tests/test_x.py
 check accept "ingestion/ without docs, AAP_SKIP_DOCS_CHECK=1" commit_with_env AAP_SKIP_DOCS_CHECK=1 "fix(staging): x$BODY" ingestion/load_staging.py
 check reject "deleting an ingestion/ file without docs" sh -c "git rm -q ingestion/load_staging.py && git commit -q -m 'refactor: remove loader$BODY'"

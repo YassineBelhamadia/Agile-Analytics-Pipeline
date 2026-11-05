@@ -1,19 +1,124 @@
-# 05. One-command pipeline and CI
+# 05. One-command pipeline
 
-Status: planned
-
-Built in Session 5 (steps 5.1–5.5) of [`../etl-plan.md`](../etl-plan.md). Each section is filled in by the commit that builds the stage.
+Status: in progress (Session 5, [`../etl-plan.md`](../etl-plan.md)).
 
 ## Purpose
 
+Takes an empty database to the built and tested `rpt_` tables with one command, and proves after each stage that nothing was lost on the way. It adds no transformation of its own. It runs the existing stages in order, starts and stops the mock API, and compares record counts between adjacent stages. There is no scheduler ([D-006](../decisions.md#d-006-orchestration-and-the-dbt-vs-plain-sql-write-up-are-deferred)).
+
+The code is three modules in `pipeline/`:
+
+- `pipeline/run.py`: the entry point, the preflight, the stage order, the exit codes and the summary.
+- `pipeline/mock_api_server.py`: the mock API as a `uvicorn` subprocess, in a context manager that always stops it ([D-043](../decisions.md#d-043-the-pipeline-starts-the-mock-api-as-a-subprocess-and-always-stops-it)).
+- `pipeline/completeness.py`: the runtime completeness checks ([D-044](../decisions.md#d-044-the-completeness-check-is-its-own-module-and-compares-counts-between-adjacent-stages)).
+
 ## Inputs and outputs
+
+**Inputs**
+
+- **`raw_data/`.** A precondition, not a stage: the simulator plays the source system, and the pipeline never regenerates it. If it is missing, the run stops with exit 2 and the command that creates it. `AAP_RAW_DATA_DIR` points elsewhere, as it does for the mock API.
+- **`AAP_API_BASE_URL`, `AAP_API_TOKEN`.** As for extraction ([01-extraction.md](01-extraction.md#inputs-and-outputs)). The URL must be a local `http://` URL, because this command starts the server there.
+- **`POSTGRES_*`.** As for the staging load and dbt. Postgres must be running; the command does not start it.
+- **The process environment only**, supplied by `uv run --env-file .env`. There is no new variable.
+- **`--landing-dir`, `--dbt-project-dir`** (optional, defaults `landing/` and `dbt/`). The tests use them to leave the real ones alone.
+
+**Outputs**
+
+The same as running the stages by hand: `landing/` replaced, the 8 `staging` tables reloaded, and the `stg` views and `marts` tables rebuilt and tested. A summary on stdout gives the seconds per stage and the counts per layer.
 
 ## Schema or contract
 
+**Stage order** (`run_pipeline`):
+
+1. **Preflight.** Variables, a Postgres connection, `raw_data/`, a local API URL, a free API port. Nothing is written before it passes.
+2. **Extraction.** Starts the mock API on the host and port of `AAP_API_BASE_URL`, waits until an authenticated `GET /rest/agile/1.0/board?maxResults=1` answers 200 (15 s at most), extracts, and stops the server. Then the landing check.
+3. **Staging load.** Then the landing-to-staging check.
+4. **dbt build.** `dbt build` as a subprocess, the same command as a manual run. Then the staging-to-marts and marts-to-`rpt_` checks.
+
+**The mock API.** A port that is already in use stops the run with exit 2: it never extracts from a server it did not start, which could be serving different data. On leaving the context manager, for any reason, the server gets SIGTERM and, after 10 s, SIGKILL. It is down during the load and the dbt build.
+
+**Exit codes** ([D-046](../decisions.md#d-046-exit-codes-by-kind-of-failure-and-each-stage-keeps-its-own-guarantee)):
+
+| Code | Meaning |
+|---|---|
+| 0 | every stage and every completeness check passed |
+| 1 | a stage failed: the mock API did not start, or an extraction, staging or `dbt build` error |
+| 2 | a precondition failed, and nothing was written |
+| 3 | a completeness check failed |
+| 130 | interrupted with Ctrl-C, after the same cleanup |
+
+**What a failed run leaves behind.** The runner prints this on stderr. The mock API is stopped in every row.
+
+| Failed at | `landing/` | `staging` | `marts` | Exit |
+|---|---|---|---|---|
+| preflight | untouched | untouched | untouched | 2 |
+| mock API start or extraction | previous run's, unchanged (scratch removed) | untouched | untouched | 1 |
+| staging load | this run's | previous rows, rolled back | untouched (now behind `landing/`) | 1 |
+| `dbt build`, a model fails | this run's | this run's | mixed: the failed model and everything downstream keep their previous tables (absent on an empty database); every other model is rebuilt, including those that run after the failure | 1 |
+| `dbt build`, a data test fails | this run's | this run's | mixed: the tested model is **already rebuilt** and holds this run's rows; everything downstream of it is skipped and keeps its previous table | 1 |
+| a completeness check | as written by the stages that passed | as written | as written | 3 |
+
+After a completeness failure nothing is rolled back: the data that failed the check is what is needed to investigate it.
+
+**Completeness checks.** Only counts between stages, never fixed numbers, so another seed passes too. The fixed SEED=22 numbers belong to the tests. A failure names the stage, the table and both counts, for example:
+
+```
+Completeness check failed at stage 'landing to staging': staging.status_transitions has 1,487 rows, landing has 1,488 status changelog items
+```
+
+| Stage in the message | Compared |
+|---|---|
+| `extraction` | Every manifest entry has its file and every file has its entry. No `.landing.partial` or `.landing.previous` is left. One changelog folder per landed issue, one `sprint_issues` folder per landed sprint. |
+| `landing to staging` | `teams` = distinct board project keys. `users` = distinct account IDs among assignees, reporters and changelog authors. `boards`, `sprints`, `capacity`, `issues` = the landed records. `status_transitions` = status changelog items. `sprint_memberships` = Sprint changelog items, and also the sprint-issue entries. |
+| `staging to marts` | The 4 dimensions and 3 facts each equal their staging table. |
+| `marts to rpt_ tables` | `rpt_sprint_metrics`, `rpt_q1_velocity`, `rpt_q2_velocity_vs_capacity` = `dim_sprint`. `rpt_q6_team_portfolio` = `dim_team`. `rpt_data_as_of` = 1. `rpt_q3_deadline_outcomes`, and the `rpt_q3_breach_rate` grand total, = issues with a due date. `rpt_q4_status_stays` = transitions + non-Epic issues. `rpt_q5_bug_to_story_ratio` = sprints + teams. `rpt_q4_time_in_status` is not empty. |
+
+Landed records are counted from the raw JSON in `pipeline/completeness.py`, without `ingestion/parse.py`, so the check can't share a bug with the parser. The membership rule holds because v1 has no carryover: an issue never leaves a sprint. A version with carryover changes it.
+
 ## How to run
+
+From the repo root, with `raw_data/` generated, `.env` copied from `.env.example` and Postgres up:
+
+```bash
+uv run --env-file .env python -m pipeline.run
+```
+
+Port 8000 (or the port of `AAP_API_BASE_URL`) must be free, so stop any mock API started by hand. Measured on 2026-11-06 on a warehouse that was already built: 13.0 s in all (extraction 3.3 s, staging load 0.2 s, dbt build 9.5 s).
 
 ## How it is verified
 
+`uv run --env-file .env python -m pytest tests/test_pipeline.py -rs`: 24 tests, 0 skipped. They never touch `landing/`, `staging`, `stg` or `marts`. The first test creates a throwaway database, `aap_pipeline_test`, fills it with a real `python -m pipeline.run` and drops it at the end. Any test that changes data works on its own clone (`create database ... template ...`). dbt runs on a copy of `dbt/`.
+
+| Test | What it proves |
+|---|---|
+| `test_one_run_from_an_empty_database_reaches_every_count` | A real process, from an empty database and no landing, exits 0. All 8 staging, 7 marts and 10 `rpt_` counts equal the shipped targets, 579 files are landed, and the API port is free again. |
+| `test_a_second_run_exits_0_with_identical_counts` | A rerun on a built database changes nothing. |
+| `test_sabotage_a_page_lost_after_extraction_exits_3` | **Sabotage:** a changelog page deleted after extraction, its manifest entry kept. Exit 3, naming the stage, the file and both counts. |
+| `test_sabotage_a_row_lost_from_landing_to_staging_exits_3` | **Sabotage:** one `staging.status_transitions` row deleted. Exit 3: 1,487 rows against 1,488 items. |
+| `test_sabotage_a_row_lost_from_staging_to_marts_exits_3` | **Sabotage:** one `marts.fct_sprint_membership` row deleted. Exit 3: 319 rows against 320. |
+| `test_sabotage_a_row_lost_from_marts_to_the_rpt_tables_exits_3` | **Sabotage:** one `marts.rpt_q1_velocity` row deleted. Exit 3: 35 rows against 36. |
+| `test_an_untouched_clone_passes_every_check_so_the_sabotage_is_what_fails` | The same setup with no deleted row exits 0. |
+| `test_a_file_missing_from_the_manifest_fails_the_landing_check`, `test_a_missing_manifest_fails_the_landing_check` | The manifest is compared in both directions. |
+| `test_sabotage_a_busy_api_port_exits_2_and_writes_nothing` | **Sabotage:** a listener on the API port. Exit 2, no landing. |
+| `test_a_failed_precondition_exits_2_and_writes_nothing` (5 cases) | Missing `raw_data/`, a blank token, a blank Postgres user, a remote API URL, a database that does not exist. |
+| `test_a_failed_stage_exits_1_and_says_what_is_stale` (2 cases) | A failed extraction and a failed load exit 1, name what is stale and leave the port free. |
+| `test_sabotage_a_failed_model_keeps_its_previous_table` | **Sabotage, on a real failed `dbt build`:** see below. |
+| `test_sabotage_a_failed_data_test_leaves_the_model_rebuilt_and_skips_downstream` | **Sabotage, on a real failed `dbt build`:** see below. |
+| `test_a_failed_model_on_an_empty_database_leaves_no_table` | With no previous run, the failed model and its downstream model do not exist. Its parents do. |
+| `test_the_mock_api_stops_when_the_block_raises`, `test_a_mock_api_that_cannot_start_is_reported`, `test_a_mock_api_that_never_answers_is_stopped` | The server is stopped on an exception and on a failed wait, and an early exit is reported. |
+| `test_ctrl_c_exits_130_and_stops_the_mock_api` | SIGINT to a real process while the server is up: exit 130, port free, no landing. |
+
+**What a failed dbt model leaves behind, measured.** dbt-postgres builds a table under a temporary name and swaps it in, so the failure table above was checked rather than assumed. Rebuilding a table gives it a new `pg_class` oid, so comparing oids before and after a failed build shows what was touched:
+
+- With `rpt_q1_velocity` broken by an unknown column: it keeps its oid and its 36 rows. Its downstream model `rpt_q6_team_portfolio` is skipped and keeps its oid. `dim_issue`, `rpt_q3_breach_rate` and `rpt_q5_bug_to_story_ratio` get new oids: models that don't depend on the failure are still rebuilt.
+- With a data test failing on `rpt_q1_velocity`: it has a **new** oid, because dbt had already replaced the table when the test ran. `rpt_q6_team_portfolio` keeps its old one.
+
+**Hooks.** `pipeline/` joined the pre-commit docs check: `sh scripts/test_hooks.sh` gives 30 passed. Without the hooks, 19 cases fail.
+
 ## Known limits
 
+To be completed in step 5.5.
+
 ## Options rejected and why
+
+To be completed in step 5.5. For now, see [D-043](../decisions.md#d-043-the-pipeline-starts-the-mock-api-as-a-subprocess-and-always-stops-it), [D-044](../decisions.md#d-044-the-completeness-check-is-its-own-module-and-compares-counts-between-adjacent-stages) and [D-046](../decisions.md#d-046-exit-codes-by-kind-of-failure-and-each-stage-keeps-its-own-guarantee).

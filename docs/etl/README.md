@@ -8,7 +8,7 @@ One page per pipeline stage, in run order. Each page uses the template below. Th
 | 2 | Staging: `landing/` → Postgres `staging` schema | [02-staging.md](02-staging.md) | done (Session 2) |
 | 3 | dbt star schema: `staging` → `stg` views → `marts` tables | [03-dbt-star-schema.md](03-dbt-star-schema.md) | done (Session 3) |
 | 4 | Sprint metrics and business questions: `marts` → `rpt_` tables | [04-metrics.md](04-metrics.md), [`../metrics/`](../metrics/README.md) | done (Session 4) |
-| 5 | One-command pipeline, CI | [05-pipeline.md](05-pipeline.md) | planned |
+| 5 | One-command pipeline | [05-pipeline.md](05-pipeline.md) | in progress (Session 5) |
 
 Upstream of stage 1, and documented elsewhere:
 
