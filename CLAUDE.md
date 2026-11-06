@@ -13,7 +13,7 @@ defensible in an interview, including the options we rejected.
 ## Read these first
 - `README.md` (English) and `README.fr.md` (French): public overview, headline results, quick start, status
 - `docs/workflow.md`: sessions, branches, gates, commit format, hooks, permissions; `docs/etl-plan.md`: every planned commit, gate and message
-- `docs/decisions.md`: decision log (`decision-log.md` is superseded, kept for history); `docs/etl/`: one page per stage
+- `docs/decisions.md`: decision log (`decision-log.md` is superseded, kept for history); `docs/etl/`: one page per stage; `docs/clean-run.md`: fresh clone to every count
 - `docs/domain-model.md`: entities, relationships, sprint metric definitions, calibration, v1 limitations
 - `docs/mock-api.md`: endpoints, pagination, verified vs. assumed; `docs/stack.md`: tool choices, reasons, what is deferred
 
@@ -75,7 +75,7 @@ defensible in an interview, including the options we rejected.
 counts must match these. Staging also equals raw_data/ row by row (raw timestamps truncated to ms; docs/etl/02-staging.md).
 - Marts (dbt): dims 3 teams / 12 users / 36 sprints / 530 issues; facts 1,488 / 320 / 36 (dbt tests check these).
   Metrics: `rpt_sprint_metrics` equals sprint_report.py on all 36 sprints (hits PHX 5, NMD 6, ATL 9); index docs/metrics/. 10 `rpt_` tables;
-  `is_rollup` splits `rpt_q3_breach_rate` 18/30 and `rpt_q4_time_in_status` 12/4 (D-047). `dbt build`: PASS=254.
+  `is_rollup` splits `rpt_q3_breach_rate` 18/30 and `rpt_q4_time_in_status` 12/4 (D-047). `dbt build`: PASS=254. pytest: 134 passed, 0 skipped.
 - Landing: 3 boards, 36 sprints, 530 issues, 36 capacity rows, changelogs 1,488 status + 320
   Sprint entries, 320 sprint-issue entries; 579 files at default page sizes, reruns byte-identical.
 - Calibration: seeds 1-60, held out 61-100 (`simulator/calibration.py`); results only in domain-model.md.
@@ -88,7 +88,7 @@ counts must match these. Staging also equals raw_data/ row by row (raw timestamp
 - Verify: `uv run python -m mock_api.verify`, `uv run python -m mock_api.verify_app`, `uv run python -m simulator.calibration`
 - Postgres up (postgres:18.6, localhost:5433, credentials from the root `.env`; copy `.env.example`):
   `docker compose --env-file .env -f warehouse/docker-compose.yml up -d --wait`
-- Postgres smoke check: `uv run --env-file .env python scripts/check_warehouse.py`; down: compose command with `down`, never `-v`
+- Postgres smoke check: `uv run --env-file .env python scripts/check_warehouse.py`; down: compose command with `down`, never `-v`. Exported `POSTGRES_*` override `--env-file`.
 - Stages by hand: `uv run --env-file .env python -m ingestion.extract` (mock API running, env vars only, D-025), then `ingestion.load_staging` (`--rebuild` for schema changes)
 - dbt: `uv run --env-file .env dbt build --project-dir dbt --profiles-dir dbt` (or `debug`; dbt also reads `.env` itself, D-026)
 - Tests: `uv run --env-file .env python -m pytest -rs` (Postgres tests skip without `POSTGRES_*`; gates need 0 skipped; `--reverse` runs them backwards)
@@ -115,9 +115,9 @@ counts must match these. Staging also equals raw_data/ row by row (raw timestamp
 2. Session 2: parsing and staging tables (done, on `feat/etl-session-2`)
 3. Session 3: dbt star schema (done, on `feat/etl-session-3`; docs/etl/03-dbt-star-schema.md)
 4. Session 4: sprint metrics and the six business questions (done, on `feat/etl-session-4`; docs/metrics/)
-5. Session 5: one-command pipeline, tests, docs, clean run from an empty database (in progress, on `feat/etl-session-5`)
+5. Session 5: one-command pipeline, tests, docs, clean run from an empty database (done, on `feat/etl-session-5`; docs/clean-run.md)
 
-If behind schedule, cut in this order: GitHub Actions, date dimension, docs polish. Never cut the reconciliation against `sprint_report.py`.
+Next: CI on its own branch (etl-plan step 5.4), then the Power BI dashboard. Never cut the reconciliation against `sprint_report.py`.
 
 ## Maintaining this file
 Update it whenever a decision, rule, command, phase or verification target changes, in the

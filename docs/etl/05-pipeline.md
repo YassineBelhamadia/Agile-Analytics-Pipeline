@@ -1,6 +1,6 @@
 # 05. One-command pipeline
 
-Status: in progress (Session 5, [`../etl-plan.md`](../etl-plan.md)).
+Status: done (Session 5, [`../etl-plan.md`](../etl-plan.md)). CI is planned on its own branch.
 
 ## Purpose
 
@@ -83,7 +83,7 @@ From the repo root, with `raw_data/` generated, `.env` copied from `.env.example
 uv run --env-file .env python -m pipeline.run
 ```
 
-Port 8000 (or the port of `AAP_API_BASE_URL`) must be free, so stop any mock API started by hand. Measured on 2026-11-06 on a warehouse that was already built: 13.0 s in all (extraction 3.3 s, staging load 0.2 s, dbt build 9.5 s).
+Port 8000 (or the port of `AAP_API_BASE_URL`) must be free, so stop any mock API started by hand. Measured on 2026-11-06 on a warehouse that was already built, before step 5.3: 13.0 s in all (extraction 3.3 s, staging load 0.2 s, dbt build 9.5 s). From a fresh clone: [`../clean-run.md`](../clean-run.md).
 
 ## How it is verified
 
@@ -130,7 +130,7 @@ Port 8000 (or the port of `AAP_API_BASE_URL`) must be free, so stop any mock API
 ### The whole suite (step 5.2)
 
 ```bash
-uv run --env-file .env python -m pytest -rs            # the gate: 132 tests, 0 skipped
+uv run --env-file .env python -m pytest -rs            # the gate: 134 tests, 0 skipped
 uv run --env-file .env python -m pytest -rs --reverse  # the same tests, backwards
 uv run python -m pytest -m "not postgres"              # the fast subset: no database, not a gate
 ```
@@ -145,15 +145,57 @@ Measured on 2026-11-06 on one machine (WSL2, Postgres in Docker). The times depe
 | Full suite, after it | 132 | 132 passed, 0 skipped | 338.97 s (5 min 39 s) |
 | Full suite, reverse order | 132 | 132 passed, 0 skipped | 330.36 s (5 min 30 s) |
 | Fast subset, no `POSTGRES_*` set | 56 | 56 passed, 76 deselected | 24.5 s |
+| Full suite, after step 5.3 | 134 | 134 passed, 0 skipped | 352.49 s (5 min 52 s) |
 
 ### Hooks
 
 `pipeline/` joined the pre-commit docs check: `sh scripts/test_hooks.sh` gives 30 passed. Without the hooks, 19 cases fail.
 
+## Clean-run acceptance
+
+Run on 2026-11-06, on commit `e09d20f`, by following [`../clean-run.md`](../clean-run.md): a fresh clone with no `raw_data/` or `landing/`, and a separate Compose project (`aap-cleanrun`) on port 5434, whose database started with 0 tables and only the `public` schema. The real warehouse was not touched by this run: the oid of every `staging`, `stg` and `marts` object, and `_loaded_at`, were the same before and after.
+
+| Check | Result |
+|---|---|
+| `uv run --env-file .env python -m pipeline.run` | exit 0 |
+| `dbt build`, inside it | `PASS=254 WARN=0 ERROR=0 SKIP=0` |
+| Counts against the documented numbers (raw data, landed files, 8 staging tables, 7 marts tables, 10 `rpt_` tables, due dates, `is_rollup` splits, sprint hits, breach rates) | 46 of 46 match |
+| **Sabotage:** one expected number changed, 1,488 transitions to 1,489 | 45 of 46, and only that table reported |
+| Full suite in the clone, against that database | 134 passed, 0 skipped |
+| `sh scripts/test_hooks.sh` | 30 passed, 0 failed |
+| `mock_api.verify`, `mock_api.verify_app` | `ALL CHECKS PASSED`, `ALL APP CHECKS PASSED` |
+| All 25 tables (8 `staging`, 17 `marts`), hashed without `_loaded_at`, against the existing warehouse | 25 identical |
+
+| Step | Time |
+|---|---|
+| `uv sync` (uv cache warm) | 0.2 s |
+| `generate_raw_data.py` | 0.8 s |
+| `docker compose ... up -d --wait` (image present) | 6.5 s |
+| `pipeline.run` | 16.9 s: extraction 2.4 s, staging load 0.2 s, dbt build 13.0 s, plus start-up |
+| `pytest -rs` | 357.23 s (5 min 57 s) |
+
+The comparison script was kept in the scratch clone and not committed: `tests/test_pipeline.py` checks the same counts on every suite run.
+
+A first attempt on the same day is not part of this record. `POSTGRES_*` variables exported in the shell took priority over the clone's `.env`, so Compose failed on port 5433 and the pipeline ran against the existing warehouse. That is why [`../clean-run.md`](../clean-run.md) starts by checking the shell.
+
 ## Known limits
 
-To be completed in step 5.5.
+- **CI is not in place yet.** Nothing runs the tests on push. GitHub Actions is planned on its own branch ([step 5.4](../etl-plan.md#step-54-github-actions-ci-planned-separate-branch)).
+- **SIGTERM skips the cleanup.** Exceptions and Ctrl-C stop the mock API, but a plain SIGTERM (or SIGKILL) to the runner ends Python at once, and the `uvicorn` child keeps running and holds the port. Checked on 2026-11-06: the runner exits 143 and the port stays open. The next run then stops with exit 2. The fix is a small signal handler that raises `KeyboardInterrupt` on SIGTERM, not yet done. It matters once something like CI or a scheduler can send SIGTERM.
+- **Exported variables win over `.env`.** `uv run --env-file` and Compose both give the shell priority, so a stale `POSTGRES_PORT` silently selects another database ([`../clean-run.md`](../clean-run.md#prerequisites)).
+- **A failed `dbt build` can leave `marts` mixed,** as the failure table says. Refresh the dashboard only after exit 0.
+- **Completeness checks count, they don't compare values.** A row with a wrong value and the right count passes. Proving the values is the job of the tests.
+- **`rpt_q3_breach_rate` and `rpt_q4_time_in_status` have no exact count check,** because their row counts depend on which combinations have data. Q3's grand total is checked, and Q4 only for being non-empty.
+- **The membership rule assumes no carryover** ([D-044](../decisions.md#d-044-the-completeness-check-is-its-own-module-and-compares-counts-between-adjacent-stages)).
+- **It doesn't start Postgres or generate `raw_data/`.** Both are preconditions, checked before anything is written.
+- **Local mock API only.** A remote `AAP_API_BASE_URL` is refused, because the command starts the server itself.
+- **Full refresh, in sequence.** Every run extracts, reloads and rebuilds everything.
 
 ## Options rejected and why
 
-To be completed in step 5.5. For now, see [D-043](../decisions.md#d-043-the-pipeline-starts-the-mock-api-as-a-subprocess-and-always-stops-it), [D-044](../decisions.md#d-044-the-completeness-check-is-its-own-module-and-compares-counts-between-adjacent-stages) and [D-046](../decisions.md#d-046-exit-codes-by-kind-of-failure-and-each-stage-keeps-its-own-guarantee).
+- **An orchestrator (Airflow or similar).** A scheduler adds infrastructure without making v1 more correct ([D-006](../decisions.md#d-006-orchestration-and-the-dbt-vs-plain-sql-write-up-are-deferred)).
+- **The mock API in process, in a thread, or started by hand.** See [D-043](../decisions.md#d-043-the-pipeline-starts-the-mock-api-as-a-subprocess-and-always-stops-it).
+- **Generating `raw_data/` in the run.** It would hide a missing or changed source ([D-043](../decisions.md#d-043-the-pipeline-starts-the-mock-api-as-a-subprocess-and-always-stops-it)).
+- **Completeness in dbt tests, inside each stage, or in pytest.** See [D-044](../decisions.md#d-044-the-completeness-check-is-its-own-module-and-compares-counts-between-adjacent-stages).
+- **One exit code for everything, or one per stage.** See [D-046](../decisions.md#d-046-exit-codes-by-kind-of-failure-and-each-stage-keeps-its-own-guarantee).
+- **Rolling back every stage, or a shadow schema swap for `marts`.** See [D-046](../decisions.md#d-046-exit-codes-by-kind-of-failure-and-each-stage-keeps-its-own-guarantee). The swap is a v1.1 candidate.

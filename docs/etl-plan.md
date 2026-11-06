@@ -25,8 +25,8 @@ Rules for this file:
 | 5.1 | 5 | `feat(pipeline): add one-command pipeline run with completeness checks` | done |
 | 5.2 | 5 | `test(pipeline): add pytest wrappers for the mock API verify scripts` | done |
 | 5.3 | 5 | `feat(metrics): flag rollup rows in breach rate and time in status` | done |
-| 5.4 | 5 | `ci: add GitHub Actions workflow with a Postgres service container` | proposed, first to cut |
-| 5.5 | 5 | `docs: finalize pipeline documentation and clean-run guide` | proposed |
+| 5.4 | after 5 | `ci: add GitHub Actions workflow with a Postgres service container` | planned, separate branch |
+| 5.5 | 5 | `docs: finalize pipeline documentation and clean-run guide` | done |
 
 ---
 
@@ -393,7 +393,7 @@ Adds time per status, bug-to-story ratio and the cross-team portfolio comparison
 
 Branch: `feat/etl-session-5`. Detailed on 2026-11-03, confirmed on 2026-11-06. Stage page: [`etl/05-pipeline.md`](etl/05-pipeline.md).
 
-**Goal.** One command takes an empty database to the built and tested `rpt_` tables, checks after each stage that nothing was lost between stages, and is documented well enough that a fresh clone reproduces every documented count. The test suite also covers the mock API's two verification scripts, and CI runs the suite on every push.
+**Goal.** One command takes an empty database to the built and tested `rpt_` tables, checks after each stage that nothing was lost between stages, and is documented well enough that a fresh clone reproduces every documented count. The test suite also covers the mock API's two verification scripts. CI, step 5.4, is planned on its own branch after the session.
 
 **Paths marked (new)** do not exist yet and are created by the step that names them. Every other file path and command below exists on `main` (checked on 2026-11-03). Names of scratch directories, databases and volumes (`.landing.partial`, `aap_pipeline_test`, `marts_next`, `aap-cleanrun_pgdata`) are explained where they appear.
 
@@ -527,7 +527,7 @@ Proposed here and approved on 2026-11-06. Each is recorded in [`decisions.md`](d
 - **Real schemas, test database.** The production run writes `landing/`, `staging`, `stg` and `marts`. Its tests never touch them: they create a throwaway database on the same server (`aap_pipeline_test`), point `POSTGRES_DB` at it, run there, and drop it afterwards. This gives a truly empty database with the real schema names. The `POSTGRES_USER` role is a superuser in the official image, so it can create databases (checked: `rolsuper` and `rolcreatedb` are true for it).
 - **Counts.** The targets are the shipped dataset's ([`CLAUDE.md`](../CLAUDE.md#shipped-dataset-seed22-verification-targets)). The `rpt_` row counts are those of [`etl/04-metrics.md`](etl/04-metrics.md#business-question-models): `rpt_sprint_metrics` 36, then in that page's table order 1, 36, 36, 320, 48, 1,988, 16, 39, 3.
 - **Gates need 0 skipped tests** (`pytest -rs`), as in every session.
-- **Commit count.** [`workflow.md`](workflow.md#one-session-one-branch) allows at most 4 commits per session. This plan has 5 when CI is kept. **Yassine confirms an exception for Session 5 at session start, or CI (5.4) is cut**, which brings it back to 4. The other steps stay separate: each is a different kind of change, with its own gate and its own review.
+- **Commit count.** [`workflow.md`](workflow.md#one-session-one-branch) allows at most 4 commits per session. The plan had 5 with CI, so at session start Yassine moved CI (5.4) to its own branch. Session 5 is the 4 commits 5.1, 5.2, 5.3 and 5.5, and the step numbers stay as planned.
 
 ### Step 5.1: one-command pipeline with completeness checks
 
@@ -618,9 +618,9 @@ feat(metrics): flag rollup rows in breach rate and time in status
 Adds is_rollup to rpt_q3_breach_rate and rpt_q4_time_in_status, so a BI tool can keep totals out of its sums, with a test that it matches the rollup labels.
 ```
 
-### Step 5.4: GitHub Actions CI (first to cut)
+### Step 5.4: GitHub Actions CI (planned, separate branch)
 
-**This is the first step to cut if time runs short** (the cut order in [`CLAUDE.md`](../CLAUDE.md#current-phase-etl-build-target-date-to-be-set-steps-and-gates-docsetl-planmd)). Without it the repo still has everything else: the one-command run, the full suite with its fast subset, and the clean-run acceptance done by hand and recorded with its date in the clean-run guide. The README status table then says "CI: deferred", and nothing runs the tests on push.
+**Not part of the Session 5 branch.** Moved at session start (2026-11-06) to its own branch, to run afterwards. Until then the repo has everything else: the one-command run, the full suite with its fast subset, and the clean-run acceptance done by hand and recorded in [`etl/05-pipeline.md`](etl/05-pipeline.md#clean-run-acceptance). The README status tables say "planned, separate branch", and nothing runs the tests on push. Before CI can send SIGTERM to a run, the gap in [`etl/05-pipeline.md`](etl/05-pipeline.md#known-limits) should be closed.
 
 - **Goal.** Every push and pull request runs the test suite against a Postgres service container, with the same commands as a local run.
 - **Scope.** One workflow: check out, install uv and `uv sync`, `uv run python scripts/generate_raw_data.py`, the mock API's verify scripts, then the suite D-045 chooses for CI, with a `postgres:18.6` service container (the same image as [`warehouse/docker-compose.yml`](../warehouse/docker-compose.yml)) and `POSTGRES_*` and `AAP_API_*` set in the job's environment. No secret: the credentials are throwaway values that exist only in the job. Action versions are pinned to exact releases, chosen at step start.
@@ -644,14 +644,14 @@ Runs the test suite on every push and pull request against a postgres:18.6 servi
 - **Goal.** The docs describe the finished v1, and a fresh clone with an empty database reproduces every documented count with one command after setup.
 - **Clean-run acceptance (part of the gate, done before the docs are written).**
   1. Fresh clone of the branch into a scratch directory, `cp .env.example .env` with local values, `uv sync`, `uv run python scripts/generate_raw_data.py`.
-  2. An empty database that leaves the real one alone: a separate compose project with its own volume and port, `docker compose --env-file .env -p aap-cleanrun -f warehouse/docker-compose.yml up -d --wait`, with `POSTGRES_PORT=5434` in that clone's `.env`. Claude Code cannot delete volumes, so Yassine removes `aap-cleanrun_pgdata` afterwards.
+  2. An empty database that leaves the real one alone: a separate compose project with its own volume and port, `docker compose --env-file .env -p aap-cleanrun -f warehouse/docker-compose.yml up -d --wait`, with `POSTGRES_PORT=5434` in that clone's `.env` and no `POSTGRES_*` or `AAP_*` variable exported in the shell, which would override it. Claude Code cannot delete volumes, so Yassine removes `aap-cleanrun_pgdata` afterwards.
   3. `uv run --env-file .env python -m pipeline.run` exits 0.
   4. Every count matches the documented numbers: raw data (3, 12, 36, 530, 1,488, 320, 36), 579 landed files, the 8 staging tables, the 4 dimensions and 3 facts, the 10 `rpt_` tables, `dbt build` `PASS=` the figure after step 5.3, and the full suite passing with 0 skipped.
-  5. The time of each stage is recorded in the clean-run guide.
+  5. The date, the time of each stage and the results are recorded in [`etl/05-pipeline.md`](etl/05-pipeline.md#clean-run-acceptance), and the times in the clean-run guide.
 - **Scope of the docs.**
   - `docs/etl/05-pipeline.md`: every section filled, status done.
   - `docs/clean-run.md` (new): the clean-run guide, prerequisites to counts, with the measured times and how to start over.
-  - `README.md` and `README.fr.md`: quick start uses the one command; status table and test counts updated; the Session 5 link checked.
+  - `README.md` and `README.fr.md`: quick start uses the one command; status table and test counts updated; the test-suite time as measured after step 5.2, with a note that it depends on the machine; the Session 5 link checked.
   - `docs/etl/README.md`: stage 5 done. `CLAUDE.md`: phase and verification targets (pytest count, `dbt build` figure, the new tests).
 - **Expected files.** The pages above.
 - **Gate.**
@@ -679,11 +679,12 @@ The internship ends mid-November, taken here as Friday 2026-11-13: 9 working day
 | 5.1 | One-command pipeline, completeness checks, hook paths | 1.5 | 2026-11-05 | keep |
 | 5.2 | Verify wrappers, shared test build | 0.5 | 2026-11-06 | keep |
 | 5.3 | `is_rollup` on the two rollup tables | 0.5 | 2026-11-06 | keep |
-| 5.4 | GitHub Actions CI (needs Yassine to push) | 1 | 2026-11-09 | **✂ cut line: cut first** |
-| 5.5 | Clean-run acceptance and final docs | 1 | 2026-11-10 | keep, shorten the polish |
+| 5.5 | Clean-run acceptance and final docs | 1 | 2026-11-09 | keep, shorten the polish |
+| **✂ cut line** | **Moved out of the session on 2026-11-06. Everything above is done.** | | | |
+| 5.4 | GitHub Actions CI, on its own branch (needs Yassine to push) | 1 | after Session 5 | cut first |
 | | Buffer (shared with the dashboard) | 3 | 2026-11-13 | |
 
-Total planned work: 4.75 days. If 5.4 is cut, 5.5 moves up a day to 2026-11-09 and the buffer grows to 4 days.
+Total planned work: 4.75 days. Steps 5.1 to 5.3 and 5.5 were all finished on 2026-11-06, ahead of these targets, which leaves CI and the dashboard the rest of the time.
 
 Step 5.5 is never cut, only shortened: the acceptance and the README numbers stay, "docs polish" goes (the third item in the cut order; the second, the date dimension, is not in v1). The reconciliation against `simulator/sprint_report.py` is never cut.
 
