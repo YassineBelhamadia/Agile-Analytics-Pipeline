@@ -12,6 +12,8 @@ Documented in docs/etl/05-pipeline.md.
 
 Stages, in order, with a completeness check after each one (D-044):
 preflight, mock API up, extraction, mock API down, staging load, dbt build.
+Preflight prints the host, port and database the run will modify, before
+anything is written (D-048).
 
 Exit codes (D-046):
     0    every stage and every completeness check passed
@@ -20,6 +22,7 @@ Exit codes (D-046):
     3    a completeness check failed; nothing is rolled back, so the data that
          failed the check can be inspected
     130  interrupted with Ctrl-C
+    143  terminated with SIGTERM, after the same cleanup as Ctrl-C (D-048)
 
 On a failure it prints what is now stale. Each stage keeps its own guarantee:
 a failed extraction keeps the previous landing, and a failed staging load
@@ -30,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -59,6 +63,7 @@ EXIT_STAGE_FAILED = 1
 EXIT_PRECONDITION = 2
 EXIT_INCOMPLETE = 3
 EXIT_INTERRUPTED = 130
+EXIT_TERMINATED = 143
 
 EXTRACTION, STAGING_LOAD, DBT_BUILD = "extraction", "staging load", "dbt build"
 
@@ -84,6 +89,21 @@ class StageError(RuntimeError):
     def __init__(self, stage: str, message: str) -> None:
         super().__init__(message)
         self.stage = stage
+
+
+class Terminated(KeyboardInterrupt):
+    """SIGTERM, raised in the main thread.
+
+    A KeyboardInterrupt, so it takes the path Ctrl-C takes: past `except
+    Exception` in `stage`, through every cleanup, and psycopg cancels a running
+    query on it. `main` catches it first, for the exit code.
+    """
+
+
+def raise_terminated(signum: int, frame: object) -> None:
+    """The SIGTERM handler. A second SIGTERM is ignored, so it can't cut the cleanup short."""
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    raise Terminated
 
 
 @dataclass
@@ -131,6 +151,8 @@ def preflight() -> Settings:
             f"Postgres is unreachable at {where}. Start it with "
             f"`docker compose --env-file .env -f warehouse/docker-compose.yml up -d --wait`. ({exc})"
         ) from exc
+    info = connection.info  # the connection actually opened, not what the variables were meant to say
+    print(f"Target database: {info.dbname} on {info.host}:{info.port}", flush=True)
     connection.close()
 
     raw_data_dir = Path(os.environ.get(RAW_DATA_ENV) or DEFAULT_RAW_DATA_DIR)
@@ -204,6 +226,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--landing-dir", default=DEFAULT_LANDING_DIR, type=Path)
     parser.add_argument("--dbt-project-dir", default=DEFAULT_DBT_PROJECT_DIR, type=Path)
     args = parser.parse_args(argv)
+    previous_handler = signal.signal(signal.SIGTERM, raise_terminated)
     try:
         print_summary(run_pipeline(args.landing_dir, args.dbt_project_dir))
     except PreconditionError as exc:
@@ -215,9 +238,14 @@ def main(argv: list[str]) -> int:
     except CompletenessError as exc:
         print(f"{exc}\nNothing was rolled back, so the data that failed the check can be inspected.", file=sys.stderr)
         return EXIT_INCOMPLETE
+    except Terminated:
+        print("Pipeline terminated by SIGTERM. The mock API was stopped.", file=sys.stderr)
+        return EXIT_TERMINATED
     except KeyboardInterrupt:
         print("Pipeline interrupted. The mock API was stopped.", file=sys.stderr)
         return EXIT_INTERRUPTED
+    finally:
+        signal.signal(signal.SIGTERM, previous_handler)
     return EXIT_OK
 
 

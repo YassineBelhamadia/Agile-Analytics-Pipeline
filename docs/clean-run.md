@@ -12,7 +12,7 @@ Linux or WSL2 Ubuntu, [Docker](https://docs.docker.com/engine/install/) with Com
 env | grep -E '^(POSTGRES_|AAP_)'     # should print nothing
 ```
 
-`uv run --env-file .env` does not override a variable already in the shell, and Compose gives the shell priority too. An exported `POSTGRES_PORT` therefore points the pipeline at another database, without any warning.
+`uv run --env-file .env` does not override a variable already in the shell, and Compose gives the shell priority too. An exported `POSTGRES_PORT` therefore points the pipeline at another database. The first line of a run names its target, for example `Target database: aap_warehouse on localhost:5433`, but the run does not wait for you to read it.
 
 ## Steps
 
@@ -42,7 +42,7 @@ The pipeline starts and stops the mock API itself. Its exit codes and what a fai
 
 ## What success looks like
 
-`pipeline.run` exits 0 and ends with a summary of the seconds per stage and the counts per layer. `dbt build`, inside it, ends with `PASS=254 WARN=0 ERROR=0`.
+`pipeline.run` starts with the `Target database:` line, exits 0, and ends with a summary of the seconds per stage and the counts per layer. `dbt build`, inside it, ends with `PASS=254 WARN=0 ERROR=0`.
 
 | Layer | Expected |
 |---|---|
@@ -53,7 +53,7 @@ The pipeline starts and stops the mock API itself. Its exit codes and what a fai
 | `marts`: facts | `fct_status_transitions` 1,488, `fct_sprint_membership` 320, `fct_capacity` 36 |
 | `marts`: `rpt_` tables (10) | `rpt_sprint_metrics` 36, `rpt_data_as_of` 1, `rpt_q1_velocity` 36, `rpt_q2_velocity_vs_capacity` 36, `rpt_q3_deadline_outcomes` 320, `rpt_q3_breach_rate` 48 (18 detail, 30 rollup), `rpt_q4_status_stays` 1,988, `rpt_q4_time_in_status` 16 (12 detail, 4 rollup), `rpt_q5_bug_to_story_ratio` 39, `rpt_q6_team_portfolio` 3 |
 | Headline figures | sprints hit: Phoenix 5, Nomad 6, Atlas 9. Breach rate, resolved only: Story 20.4%, Task 28.9%, Bug 38.8% |
-| `pytest -rs` | 134 passed, 0 skipped |
+| `pytest -rs` | 140 passed, 0 skipped |
 
 ## How long it takes
 
@@ -65,7 +65,7 @@ Measured on 2026-11-06 with the Docker image and the uv cache already downloaded
 | `generate_raw_data.py` | 0.8 s |
 | `docker compose ... up -d --wait` | 6.5 s |
 | `pipeline.run`, on an empty database | 16.9 s |
-| `pytest -rs` | 357.23 s (5 min 57 s) |
+| `pytest -rs` | 319.74 s (5 min 20 s), with 140 tests |
 
 A first run also downloads the Postgres image and the Python packages.
 
@@ -79,6 +79,8 @@ docker compose --env-file .env -p aap-cleanrun -f warehouse/docker-compose.yml u
 docker ps --filter name=aap-cleanrun  # must show 127.0.0.1:5434, healthy
 uv run --env-file .env python -m pipeline.run
 ```
+
+The first line of the run must say `on localhost:5434`. If it names another port, stop the run at once with Ctrl-C.
 
 Stop it with the same compose command and `down`. Its data stays in the volume `aap-cleanrun_pgdata` until you remove that volume.
 

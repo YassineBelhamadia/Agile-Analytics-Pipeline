@@ -75,7 +75,7 @@ defensible in an interview, including the options we rejected.
 counts must match these. Staging also equals raw_data/ row by row (raw timestamps truncated to ms; docs/etl/02-staging.md).
 - Marts (dbt): dims 3 teams / 12 users / 36 sprints / 530 issues; facts 1,488 / 320 / 36 (dbt tests check these).
   Metrics: `rpt_sprint_metrics` equals sprint_report.py on all 36 sprints (hits PHX 5, NMD 6, ATL 9); index docs/metrics/. 10 `rpt_` tables;
-  `is_rollup` splits `rpt_q3_breach_rate` 18/30 and `rpt_q4_time_in_status` 12/4 (D-047). `dbt build`: PASS=254. pytest: 134 passed, 0 skipped.
+  `is_rollup` splits `rpt_q3_breach_rate` 18/30 and `rpt_q4_time_in_status` 12/4 (D-047). `dbt build`: PASS=254. pytest: 140 passed, 0 skipped.
 - Landing: 3 boards, 36 sprints, 530 issues, 36 capacity rows, changelogs 1,488 status + 320
   Sprint entries, 320 sprint-issue entries; 579 files at default page sizes, reruns byte-identical.
 - Calibration: seeds 1-60, held out 61-100 (`simulator/calibration.py`); results only in domain-model.md.
@@ -84,7 +84,7 @@ counts must match these. Staging also equals raw_data/ row by row (raw timestamp
 ## Commands (from repo root; `--env-file .env` wherever credentials are needed)
 - Data / mock API: `uv run python scripts/generate_raw_data.py`; `uv run uvicorn mock_api.app:app --port 8000`
 - Whole pipeline (Postgres up, `raw_data/` generated, API port free): `uv run --env-file .env python -m pipeline.run`.
-  Exit 0 ok, 1 stage failed, 2 precondition (nothing written), 3 completeness check failed, 130 interrupted (D-046).
+  Exit 0 ok, 1 stage failed, 2 precondition (nothing written), 3 completeness check failed, 130 Ctrl-C, 143 SIGTERM (D-046, D-048). Its first line names the target database.
 - Verify: `uv run python -m mock_api.verify`, `uv run python -m mock_api.verify_app`, `uv run python -m simulator.calibration`
 - Postgres up (postgres:18.6, localhost:5433, credentials from the root `.env`; copy `.env.example`):
   `docker compose --env-file .env -f warehouse/docker-compose.yml up -d --wait`

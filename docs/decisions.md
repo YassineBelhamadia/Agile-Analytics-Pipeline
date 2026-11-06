@@ -762,6 +762,7 @@ The narrative record of the early project decisions, with the full argument for 
   - The API URL must be a local `http://` URL.
   - A mock API started by hand must be stopped first.
   - A fresh clone needs `scripts/generate_raw_data.py` once before the one command.
+  - SIGTERM did not reach this cleanup at first. [D-048](#d-048-sigterm-stops-the-run-like-ctrl-c-and-the-run-names-its-target-database) closes that gap.
 - **Source:** `pipeline/mock_api_server.py`, `pipeline/run.py`; [`etl/05-pipeline.md`](etl/05-pipeline.md).
 
 ## D-044: The completeness check is its own module and compares counts between adjacent stages
@@ -815,7 +816,7 @@ The narrative record of the early project decisions, with the full argument for 
 
 - **Date:** 2026-11-06
 - **Decision:**
-  - Exit codes: 0 success, 1 a stage failed, 2 a precondition failed with nothing written, 3 a completeness check failed, 130 interrupted.
+  - Exit codes: 0 success, 1 a stage failed, 2 a precondition failed with nothing written, 3 a completeness check failed, 130 interrupted, and 143 terminated ([D-048](#d-048-sigterm-stops-the-run-like-ctrl-c-and-the-run-names-its-target-database)).
   - A failed stage is not undone beyond its own guarantee: a failed extraction keeps the previous landing, and a failed staging load rolls back. The runner prints what is now stale.
   - After a completeness failure nothing is rolled back, because that data is what is needed to investigate it.
 - **Context:** a script or a CI log must tell "Postgres is down" from "a row went missing", and a reader must know the state after a failure.
@@ -854,3 +855,29 @@ The narrative record of the early project decisions, with the full argument for 
   - A rate, mean or median is still never summed. A visual showing one reads the row of its level.
   - `dbt build` goes from `PASS=251` to `PASS=254`: 3 more data tests, 229 in all.
 - **Source:** `dbt/models/metrics/rpt_q3_breach_rate.sql`, `rpt_q4_time_in_status.sql`, `dbt/tests/assert_rollup_flag_matches_labels.sql`.
+
+## D-048: SIGTERM stops the run like Ctrl-C, and the run names its target database
+
+- **Date:** 2026-11-06
+- **Decision:**
+  - `pipeline/run.py` installs a SIGTERM handler for the length of the run. It raises `Terminated`, a subclass of `KeyboardInterrupt`, so SIGTERM takes the path Ctrl-C takes: the mock API is stopped with the same sequence, and the run exits 143.
+  - A second SIGTERM is ignored, so it can't cut the cleanup short.
+  - As soon as preflight has connected, the run prints one line, `Target database: <name> on <host>:<port>`, read from the open connection. It never prints the password.
+- **Context:**
+  - A plain SIGTERM ended Python at once and skipped the cleanup of [D-043](#d-043-the-pipeline-starts-the-mock-api-as-a-subprocess-and-always-stops-it): the runner exited 143 and `uvicorn` kept the port. CI and schedulers cancel with SIGTERM.
+  - During the Session 5 clean run, exported `POSTGRES_*` variables overrode a clone's `.env`, and a run reached a different database with nothing on screen to say so.
+- **Options considered:**
+  - **A plain `Exception` subclass from the handler.** `stage()` would catch it and report a stage failure, exit 1.
+  - **A `KeyboardInterrupt` subclass** (chosen). It passes `except Exception`, runs every cleanup, and psycopg cancels a running query on it (`KeyboardInterrupt` is what it checks for).
+  - **Treating SIGTERM as exit 130.** One path fewer, but a script could not tell a person's Ctrl-C from a scheduler's cancel. 143 is the shell convention, 128 + 15.
+  - **`atexit` for the cleanup.** It doesn't run on an unhandled SIGTERM.
+  - **Starting `uvicorn` so that it dies with its parent** (for example `prctl`). Linux only, and it would not cover the rest of the cleanup.
+  - **For the target: printing the environment variables.** They say what was intended. The connection says what was reached.
+  - **A confirmation prompt, or an allow-list of targets.** A prompt breaks the one-command run and any unattended use, and an allow-list would need a setting no other stage has. The line informs, and doesn't protect.
+- **Why:** one cleanup path to test, and the exit code keeps the two signals apart.
+- **Consequences:**
+  - SIGTERM during `dbt build` kills dbt (`subprocess.run` does this on any exception), so `marts` can be mixed, as after a failed build.
+  - SIGKILL still can't be handled.
+  - The target line is printed only once Postgres answers. If the connection fails, the exit 2 message names the host and port instead.
+  - The handler is installed in `main`, so a signal during Python's start-up, before anything is running, still ends the process at once.
+- **Source:** `pipeline/run.py`; `tests/test_pipeline.py`; [`etl/05-pipeline.md`](etl/05-pipeline.md#schema-or-contract).

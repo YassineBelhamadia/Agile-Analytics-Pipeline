@@ -30,7 +30,7 @@ The same as running the stages by hand: `landing/` replaced, the 8 `staging` tab
 
 **Stage order** (`run_pipeline`):
 
-1. **Preflight.** Variables, a Postgres connection, `raw_data/`, a local API URL, a free API port. Nothing is written before it passes.
+1. **Preflight.** Variables, a Postgres connection, `raw_data/`, a local API URL, a free API port. Nothing is written before it passes. As soon as the connection opens, it prints the host, port and database the run will modify, taken from that connection, for example `Target database: aap_warehouse on localhost:5433`. It never prints the password ([D-048](../decisions.md#d-048-sigterm-stops-the-run-like-ctrl-c-and-the-run-names-its-target-database)).
 2. **Extraction.** Starts the mock API on the host and port of `AAP_API_BASE_URL`, waits until an authenticated `GET /rest/agile/1.0/board?maxResults=1` answers 200 (15 s at most), extracts, and stops the server. Then the landing check.
 3. **Staging load.** Then the landing-to-staging check.
 4. **dbt build.** `dbt build` as a subprocess, the same command as a manual run. Then the staging-to-marts and marts-to-`rpt_` checks.
@@ -46,6 +46,7 @@ The same as running the stages by hand: `landing/` replaced, the 8 `staging` tab
 | 2 | a precondition failed, and nothing was written |
 | 3 | a completeness check failed |
 | 130 | interrupted with Ctrl-C, after the same cleanup |
+| 143 | terminated with SIGTERM, after the same cleanup as Ctrl-C ([D-048](../decisions.md#d-048-sigterm-stops-the-run-like-ctrl-c-and-the-run-names-its-target-database)) |
 
 **What a failed run leaves behind.** The runner prints this on stderr. The mock API is stopped in every row.
 
@@ -59,6 +60,8 @@ The same as running the stages by hand: `landing/` replaced, the 8 `staging` tab
 | a completeness check | as written by the stages that passed | as written | as written | 3 |
 
 After a completeness failure nothing is rolled back: the data that failed the check is what is needed to investigate it.
+
+Ctrl-C and SIGTERM leave what a failure at that stage leaves: extraction removes its scratch directory, the staging load rolls back, and `dbt build` is killed, which can leave `marts` mixed. The mock API is stopped in every case.
 
 **Completeness checks.** Only counts between stages, never fixed numbers, so another seed passes too. The fixed SEED=22 numbers belong to the tests. A failure names the stage, the table and both counts, for example:
 
@@ -89,7 +92,7 @@ Port 8000 (or the port of `AAP_API_BASE_URL`) must be free, so stop any mock API
 
 ### The pipeline (step 5.1)
 
-`uv run --env-file .env python -m pytest tests/test_pipeline.py -rs`: 24 tests, 0 skipped. They never touch `landing/`, `staging`, `stg` or `marts`. The first test creates a throwaway database, `aap_pipeline_test`, fills it with a real `python -m pipeline.run` and drops it at the end. Any test that changes data works on its own clone (`create database ... template ...`). dbt runs on a copy of `dbt/`.
+`uv run --env-file .env python -m pytest tests/test_pipeline.py -rs`: 30 tests, 0 skipped. They never touch `landing/`, `staging`, `stg` or `marts`. The first test creates a throwaway database, `aap_pipeline_test`, fills it with a real `python -m pipeline.run` and drops it at the end. Any test that changes data works on its own clone (`create database ... template ...`). dbt runs on a copy of `dbt/`.
 
 | Test | What it proves |
 |---|---|
@@ -109,6 +112,14 @@ Port 8000 (or the port of `AAP_API_BASE_URL`) must be free, so stop any mock API
 | `test_a_failed_model_on_an_empty_database_leaves_no_table` | With no previous run, the failed model and its downstream model do not exist. Its parents do. |
 | `test_the_mock_api_stops_when_the_block_raises`, `test_a_mock_api_that_cannot_start_is_reported`, `test_a_mock_api_that_never_answers_is_stopped` | The server is stopped on an exception and on a failed wait, and an early exit is reported. |
 | `test_ctrl_c_exits_130_and_stops_the_mock_api` | SIGINT to a real process while the server is up: exit 130, port free, no landing. |
+| `test_sigterm_exits_143_and_stops_the_mock_api` | SIGTERM to the runner alone, in its own process group, while the server is up: exit 143, port free, no process left, no landing or scratch directory. Removing the handler fails it with `-15 == 143`, and skipping the cleanup fails it on the port. |
+| `test_sigterm_during_the_dbt_build_exits_143_and_stops_dbt` | SIGTERM while dbt runs: exit 143, and no dbt process is left. |
+| `test_a_signal_during_the_staging_load_rolls_back` | The signal arrives with the tables truncated and half refilled: exit 143, and every staging count is unchanged. |
+| `test_a_second_sigterm_cannot_interrupt_the_cleanup` | A second SIGTERM during the cleanup is ignored, and `main` restores the previous handler. |
+| `test_the_target_line_comes_before_any_stage_and_never_shows_the_password` | In a real run, the first line of output names the host, port and database, exactly once, before the first stage, and the password appears nowhere. Adding the password, or dropping or changing the database name, fails it. |
+| `test_the_target_line_names_the_database_of_this_run_before_a_precondition_stops_it` | On another database the line names that database, and it is printed even when a precondition stops the run. |
+
+**SIGTERM through `uv run`.** The tests signal the Python process. Checked by hand on 2026-11-06 with the documented command: a SIGTERM sent to the `uv` process alone reaches the runner, which exits 143, and `uv` exits 143 too. The API port was closed afterwards and nothing was landed.
 
 **What a failed dbt model leaves behind, measured.** dbt-postgres builds a table under a temporary name and swaps it in, so the failure table above was checked rather than assumed. Rebuilding a table gives it a new `pg_class` oid, so comparing oids before and after a failed build shows what was touched:
 
@@ -130,7 +141,7 @@ Port 8000 (or the port of `AAP_API_BASE_URL`) must be free, so stop any mock API
 ### The whole suite (step 5.2)
 
 ```bash
-uv run --env-file .env python -m pytest -rs            # the gate: 134 tests, 0 skipped
+uv run --env-file .env python -m pytest -rs            # the gate: 140 tests, 0 skipped
 uv run --env-file .env python -m pytest -rs --reverse  # the same tests, backwards
 uv run python -m pytest -m "not postgres"              # the fast subset: no database, not a gate
 ```
@@ -146,6 +157,9 @@ Measured on 2026-11-06 on one machine (WSL2, Postgres in Docker). The times depe
 | Full suite, reverse order | 132 | 132 passed, 0 skipped | 330.36 s (5 min 30 s) |
 | Fast subset, no `POSTGRES_*` set | 56 | 56 passed, 76 deselected | 24.5 s |
 | Full suite, after step 5.3 | 134 | 134 passed, 0 skipped | 352.49 s (5 min 52 s) |
+| Full suite, after the SIGTERM fix ([D-048](../decisions.md#d-048-sigterm-stops-the-run-like-ctrl-c-and-the-run-names-its-target-database)) | 140 | 140 passed, 0 skipped | 319.74 s (5 min 20 s) |
+| Full suite after the SIGTERM fix, reverse order | 140 | 140 passed, 0 skipped | 320.98 s (5 min 21 s) |
+| Fast subset after the SIGTERM fix, no `POSTGRES_*` set | 57 | 57 passed, 83 deselected | 24.1 s |
 
 ### Hooks
 
@@ -181,8 +195,8 @@ A first attempt on the same day is not part of this record. `POSTGRES_*` variabl
 ## Known limits
 
 - **CI is not in place yet.** Nothing runs the tests on push. GitHub Actions is planned on its own branch ([step 5.4](../etl-plan.md#step-54-github-actions-ci-planned-separate-branch)).
-- **SIGTERM skips the cleanup.** Exceptions and Ctrl-C stop the mock API, but a plain SIGTERM (or SIGKILL) to the runner ends Python at once, and the `uvicorn` child keeps running and holds the port. Checked on 2026-11-06: the runner exits 143 and the port stays open. The next run then stops with exit 2. The fix is a small signal handler that raises `KeyboardInterrupt` on SIGTERM, not yet done. It matters once something like CI or a scheduler can send SIGTERM.
-- **Exported variables win over `.env`.** `uv run --env-file` and Compose both give the shell priority, so a stale `POSTGRES_PORT` silently selects another database ([`../clean-run.md`](../clean-run.md#prerequisites)).
+- **SIGKILL can't be handled.** No process can catch it, so the `uvicorn` child would keep running and hold the port. The next run then stops with exit 2.
+- **Exported variables win over `.env`.** `uv run --env-file` and Compose both give the shell priority, so a stale `POSTGRES_PORT` selects another database ([`../clean-run.md`](../clean-run.md#prerequisites)). The target line shows which one, but the run does not stop to ask ([D-048](../decisions.md#d-048-sigterm-stops-the-run-like-ctrl-c-and-the-run-names-its-target-database)).
 - **A failed `dbt build` can leave `marts` mixed,** as the failure table says. Refresh the dashboard only after exit 0.
 - **Completeness checks count, they don't compare values.** A row with a wrong value and the right count passes. Proving the values is the job of the tests.
 - **`rpt_q3_breach_rate` and `rpt_q4_time_in_status` have no exact count check,** because their row counts depend on which combinations have data. Q3's grand total is checked, and Q4 only for being non-empty.
@@ -198,4 +212,5 @@ A first attempt on the same day is not part of this record. `POSTGRES_*` variabl
 - **Generating `raw_data/` in the run.** It would hide a missing or changed source ([D-043](../decisions.md#d-043-the-pipeline-starts-the-mock-api-as-a-subprocess-and-always-stops-it)).
 - **Completeness in dbt tests, inside each stage, or in pytest.** See [D-044](../decisions.md#d-044-the-completeness-check-is-its-own-module-and-compares-counts-between-adjacent-stages).
 - **One exit code for everything, or one per stage.** See [D-046](../decisions.md#d-046-exit-codes-by-kind-of-failure-and-each-stage-keeps-its-own-guarantee).
+- **Sharing exit 130 for SIGTERM, or a confirmation prompt before writing.** See [D-048](../decisions.md#d-048-sigterm-stops-the-run-like-ctrl-c-and-the-run-names-its-target-database).
 - **Rolling back every stage, or a shadow schema swap for `marts`.** See [D-046](../decisions.md#d-046-exit-codes-by-kind-of-failure-and-each-stage-keeps-its-own-guarantee). The swap is a v1.1 candidate.

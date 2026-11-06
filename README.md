@@ -9,7 +9,7 @@ A data pipeline that combines Jira delivery data with team capacity data across 
 - **Problem.** Jira reports on one team at a time and has no notion of team capacity. A cross-team view of delivery against capacity needs its own pipeline.
 - **What it does.** Extracts Jira-shaped data and capacity data for three teams over 12 sprints each. Loads them into a Postgres warehouse, models a star schema in dbt, and answers six business questions as ready-to-read tables.
 - **Stack.** Python 3.13, SimPy, FastAPI, httpx, PostgreSQL 18 in Docker, dbt Core 1.12, pytest, uv. Power BI dashboard planned.
-- **Proof.** Sprint metrics equal an independent answer key (`simulator/sprint_report.py`) on all 36 sprints. Staging equals the simulator's ground truth row by row. 134 pytest tests, 229 dbt data tests and 30 hook tests pass. 34 sabotage tests show the checks can fail.
+- **Proof.** Sprint metrics equal an independent answer key (`simulator/sprint_report.py`) on all 36 sprints. Staging equals the simulator's ground truth row by row. 140 pytest tests, 229 dbt data tests and 30 hook tests pass. 34 sabotage tests show the checks can fail.
 - **Data.** Simulated, and served through a mock of Jira's real REST contract ([why](#a-note-on-the-data)).
 - **Try it.** [Quick start](#quick-start): one command builds the warehouse from an empty database, in about 25 seconds from a clone once the downloads are done.
 
@@ -98,10 +98,10 @@ What makes the numbers trustworthy, with the evidence for each.
 - **Data tests in dbt.** 229 data tests: unique, not null, relationships, accepted values, row counts, and 12 singular tests. For example: every transition falls in exactly one sprint window, and every breach-rate rollup equals the sum of its parts ([`dbt/tests/`](dbt/tests/)).
 - **Runtime completeness checks.** Separate from the tests: after each stage of a real run, [`pipeline/completeness.py`](pipeline/completeness.py) compares counts with the stage before (manifest, landed files, staging, marts, `rpt_` tables). A lost row stops the run with exit 3 and a message naming the stage and both counts ([D-044](docs/decisions.md#d-044-the-completeness-check-is-its-own-module-and-compares-counts-between-adjacent-stages)).
 - **Git hooks.** `commit-msg` enforces Conventional Commits. `pre-commit` refuses commits on `main`, and refuses code changes under `ingestion/`, `pipeline/`, `warehouse/` or `dbt/` without a change under `docs/`. [`scripts/test_hooks.sh`](scripts/test_hooks.sh) runs 30 cases in a throwaway repository ([workflow.md](docs/workflow.md#hooks)).
-- **Decision log.** 47 recorded decisions (D-001 to D-047), each with its context, the options considered and why they lost ([decisions.md](docs/decisions.md)).
+- **Decision log.** 48 recorded decisions (D-001 to D-048), each with its context, the options considered and why they lost ([decisions.md](docs/decisions.md)).
 - **No secrets in the repository.** Every credential comes from the environment through `--env-file .env`. Only [`.env.example`](.env.example), with placeholders, is tracked.
 
-**Test counts** (run on 2026-11-06): `pytest` 134 passed, 0 skipped (extraction 18, staging 33, reconciliation 10, dbt 19, metrics 26, mock API verification 4, pipeline 24), in both normal and reverse order. `dbt build` PASS=254 (8 views, 17 tables, 229 data tests). Hook tests 30 passed. The mock API's two verification scripts cover its 48 documented claims ([mock-api.md](docs/mock-api.md#7-verification-status)).
+**Test counts** (run on 2026-11-06): `pytest` 140 passed, 0 skipped (extraction 18, staging 33, reconciliation 10, dbt 19, metrics 26, mock API verification 4, pipeline 30), in both normal and reverse order. `dbt build` PASS=254 (8 views, 17 tables, 229 data tests). Hook tests 30 passed. The mock API's two verification scripts cover its 48 documented claims ([mock-api.md](docs/mock-api.md#7-verification-status)).
 
 ## Skills demonstrated
 
@@ -149,9 +149,9 @@ uv run --env-file .env python -m pipeline.run
 uv run --env-file .env python -m pytest -rs
 ```
 
-Exit codes: 0 success, 1 a stage failed, 2 a precondition failed and nothing was written, 3 a completeness check failed, 130 interrupted. The [clean-run guide](docs/clean-run.md) has the full walk-through, and [05-pipeline.md](docs/etl/05-pipeline.md#schema-or-contract) says what a failed run leaves behind.
+Exit codes: 0 success, 1 a stage failed, 2 a precondition failed and nothing was written, 3 a completeness check failed, 130 interrupted with Ctrl-C, 143 terminated with SIGTERM. The run prints the host, port and database it will modify before it writes anything. The [clean-run guide](docs/clean-run.md) has the full walk-through, and [05-pipeline.md](docs/etl/05-pipeline.md#schema-or-contract) says what a failed run leaves behind.
 
-For a quick check with no database, `uv run python -m pytest -m "not postgres"` runs 56 tests in about 25 seconds. It is not a substitute for the full suite.
+For a quick check with no database, `uv run python -m pytest -m "not postgres"` runs 57 tests in about 25 seconds. It is not a substitute for the full suite.
 
 **How long it takes.** Measured from a fresh clone and an empty database, with the Docker image and the uv cache already downloaded: steps 1 to 4 take about 25 seconds (`dbt build` is about 13 of them). The test suite took 5 min 39 s, measured after step 5.2 on this project's development machine (16 logical cores, 15 GB of memory, WSL2). These times depend on the machine. A first run also downloads the Postgres image and the Python packages.
 
@@ -159,11 +159,11 @@ For a quick check with no database, `uv run python -m pytest -m "not postgres"` 
 <summary>What success looks like</summary>
 
 - `generate_raw_data.py` ends with `'teams': 3, 'users': 12, 'sprints': 36, 'issues': 530, 'status_transitions': 1488, 'sprint_issue_memberships': 320, 'capacities': 36`.
-- `pipeline.run` exits 0 and prints the seconds per stage and the counts per layer:
+- `pipeline.run` starts with a `Target database:` line, exits 0, and prints the seconds per stage and the counts per layer:
   - `landing/` holds 578 pages (530 of them changelogs) plus `manifest.json`.
   - `staging` holds 3 teams, 12 users, 3 boards, 36 sprints, 36 capacity rows, 530 issues, 1,488 status transitions and 320 sprint memberships.
   - `dbt build`, inside it, ends with `PASS=254 WARN=0 ERROR=0`.
-- `pytest -rs` ends with `134 passed`, and no test is skipped.
+- `pytest -rs` ends with `140 passed`, and no test is skipped.
 
 </details>
 
@@ -235,7 +235,7 @@ Generated and gitignored: `raw_data/` (ground truth), `landing/` (raw API pages)
 
 - **Project and process**
   - [stack.md](docs/stack.md): tool choices, why, and what is deferred
-  - [decisions.md](docs/decisions.md): the decision log, D-001 to D-047
+  - [decisions.md](docs/decisions.md): the decision log, D-001 to D-048
   - [decision-log.md](docs/decision-log.md): the early narrative record, superseded by decisions.md and kept for history
   - [workflow.md](docs/workflow.md): branches, gates, commit format, hooks, permissions
   - [etl-plan.md](docs/etl-plan.md): every planned commit, with its gate

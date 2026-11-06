@@ -9,7 +9,7 @@ Un pipeline de données qui croise les données de livraison Jira avec les donn�
 - **Problème.** Jira produit ses rapports équipe par équipe et ne connaît pas la capacité des équipes. Une vue transverse de la livraison rapportée à la capacité demande un pipeline dédié.
 - **Ce qu'il fait.** Il extrait des données au format Jira et des données de capacité pour trois équipes, sur 12 sprints chacune. Il les charge dans un entrepôt Postgres, modélise un schéma en étoile avec dbt et répond à six questions métier sous forme de tables prêtes à lire.
 - **Stack.** Python 3.13, SimPy, FastAPI, httpx, PostgreSQL 18 sous Docker, dbt Core 1.12, pytest, uv. Tableau de bord Power BI prévu.
-- **Preuves.** Les métriques de sprint sont égales à un corrigé indépendant (`simulator/sprint_report.py`) sur les 36 sprints. Le staging est égal, ligne à ligne, à la vérité terrain du simulateur. 134 tests pytest, 229 tests de données dbt et 30 tests de hooks passent. 34 tests de sabotage montrent que les contrôles savent échouer.
+- **Preuves.** Les métriques de sprint sont égales à un corrigé indépendant (`simulator/sprint_report.py`) sur les 36 sprints. Le staging est égal, ligne à ligne, à la vérité terrain du simulateur. 140 tests pytest, 229 tests de données dbt et 30 tests de hooks passent. 34 tests de sabotage montrent que les contrôles savent échouer.
 - **Données.** Simulées, et servies par une imitation du contrat REST réel de Jira ([pourquoi](#une-note-sur-les-données)).
 - **Essayer.** [Démarrage rapide](#démarrage-rapide) : une seule commande construit l'entrepôt depuis une base vide, en environ 25 secondes depuis un clone une fois les téléchargements faits.
 
@@ -98,10 +98,10 @@ Ce qui rend les chiffres fiables, avec la preuve de chaque point.
 - **Tests de données dans dbt.** 229 tests de données : unicité, non-nullité, relations, valeurs acceptées, nombres de lignes, et 12 tests singuliers. Par exemple : chaque transition tombe dans exactement une fenêtre de sprint, et chaque agrégat des taux de dépassement est égal à la somme de ses parties ([`dbt/tests/`](dbt/tests/)).
 - **Contrôles d'exhaustivité à l'exécution.** Distincts des tests : après chaque étape d'une exécution réelle, [`pipeline/completeness.py`](pipeline/completeness.py) compare les nombres d'enregistrements avec l'étape précédente (manifeste, fichiers déposés, staging, marts, tables `rpt_`). Une ligne perdue arrête l'exécution avec le code 3 et un message qui nomme l'étape et les deux nombres ([D-044](docs/decisions.md#d-044-the-completeness-check-is-its-own-module-and-compares-counts-between-adjacent-stages)).
 - **Hooks git.** `commit-msg` impose les Conventional Commits. `pre-commit` refuse les commits sur `main`, ainsi que les modifications de code sous `ingestion/`, `pipeline/`, `warehouse/` ou `dbt/` sans modification sous `docs/`. [`scripts/test_hooks.sh`](scripts/test_hooks.sh) exécute 30 cas dans un dépôt jetable ([workflow.md](docs/workflow.md#hooks)).
-- **Journal des décisions.** 47 décisions consignées (D-001 à D-047), chacune avec son contexte, les options envisagées et la raison de leur rejet ([decisions.md](docs/decisions.md)).
+- **Journal des décisions.** 48 décisions consignées (D-001 à D-048), chacune avec son contexte, les options envisagées et la raison de leur rejet ([decisions.md](docs/decisions.md)).
 - **Aucun secret dans le dépôt.** Tous les identifiants viennent de l'environnement, via `--env-file .env`. Seul [`.env.example`](.env.example), avec des valeurs factices, est versionné.
 
-**Nombre de tests** (exécutés le 2026-11-06) : `pytest` 134 réussis, 0 ignoré (extraction 18, staging 33, réconciliation 10, dbt 19, métriques 26, vérification de l'API simulée 4, pipeline 24), dans l'ordre normal comme dans l'ordre inverse. `dbt build` PASS=254 (8 vues, 17 tables, 229 tests de données). Tests des hooks : 30 réussis. Les deux scripts de vérification de l'API simulée couvrent ses 48 affirmations documentées ([mock-api.md](docs/mock-api.md#7-verification-status)).
+**Nombre de tests** (exécutés le 2026-11-06) : `pytest` 140 réussis, 0 ignoré (extraction 18, staging 33, réconciliation 10, dbt 19, métriques 26, vérification de l'API simulée 4, pipeline 30), dans l'ordre normal comme dans l'ordre inverse. `dbt build` PASS=254 (8 vues, 17 tables, 229 tests de données). Tests des hooks : 30 réussis. Les deux scripts de vérification de l'API simulée couvrent ses 48 affirmations documentées ([mock-api.md](docs/mock-api.md#7-verification-status)).
 
 ## Compétences démontrées
 
@@ -149,9 +149,9 @@ uv run --env-file .env python -m pipeline.run
 uv run --env-file .env python -m pytest -rs
 ```
 
-Codes de sortie : 0 succès, 1 une étape a échoué, 2 un prérequis manque et rien n'a été écrit, 3 un contrôle d'exhaustivité a échoué, 130 interruption. Le [guide d'exécution à partir de zéro](docs/clean-run.md) (en anglais) détaille tout le parcours, et [05-pipeline.md](docs/etl/05-pipeline.md#schema-or-contract) indique ce que laisse une exécution en échec.
+Codes de sortie : 0 succès, 1 une étape a échoué, 2 un prérequis manque et rien n'a été écrit, 3 un contrôle d'exhaustivité a échoué, 130 interruption par Ctrl-C, 143 arrêt par SIGTERM. L'exécution affiche l'hôte, le port et la base qu'elle va modifier avant d'écrire quoi que ce soit. Le [guide d'exécution à partir de zéro](docs/clean-run.md) (en anglais) détaille tout le parcours, et [05-pipeline.md](docs/etl/05-pipeline.md#schema-or-contract) indique ce que laisse une exécution en échec.
 
-Pour un contrôle rapide sans base de données, `uv run python -m pytest -m "not postgres"` lance 56 tests en environ 25 secondes. Cela ne remplace pas la suite complète.
+Pour un contrôle rapide sans base de données, `uv run python -m pytest -m "not postgres"` lance 57 tests en environ 25 secondes. Cela ne remplace pas la suite complète.
 
 **Durée.** Mesurée depuis un clone neuf et une base de données vide, avec l'image Docker et le cache uv déjà téléchargés : les étapes 1 à 4 prennent environ 25 secondes (dont environ 13 pour `dbt build`). La suite de tests a pris 5 min 39 s, mesurée après l'étape 5.2 sur la machine de développement du projet (16 cœurs logiques, 15 Go de mémoire, WSL2). Ces durées dépendent de la machine. Une première exécution télécharge en plus l'image Postgres et les paquets Python.
 
@@ -159,11 +159,11 @@ Pour un contrôle rapide sans base de données, `uv run python -m pytest -m "not
 <summary>À quoi ressemble une exécution réussie</summary>
 
 - `generate_raw_data.py` se termine par `'teams': 3, 'users': 12, 'sprints': 36, 'issues': 530, 'status_transitions': 1488, 'sprint_issue_memberships': 320, 'capacities': 36`.
-- `pipeline.run` se termine avec le code 0 et affiche les secondes par étape et les nombres par couche :
+- `pipeline.run` commence par une ligne `Target database:`, se termine avec le code 0 et affiche les secondes par étape et les nombres par couche :
   - `landing/` contient 578 pages (dont 530 de changelogs) plus `manifest.json`.
   - `staging` contient 3 équipes, 12 utilisateurs, 3 tableaux, 36 sprints, 36 lignes de capacité, 530 tickets, 1 488 transitions de statut et 320 appartenances à un sprint.
   - `dbt build`, à l'intérieur, se termine par `PASS=254 WARN=0 ERROR=0`.
-- `pytest -rs` se termine par `134 passed`, sans aucun test ignoré.
+- `pytest -rs` se termine par `140 passed`, sans aucun test ignoré.
 
 </details>
 
@@ -237,7 +237,7 @@ La documentation détaillée est en anglais.
 
 - **Projet et méthode**
   - [stack.md](docs/stack.md) : choix des outils, leurs raisons, et ce qui est reporté
-  - [decisions.md](docs/decisions.md) : le journal des décisions, D-001 à D-047
+  - [decisions.md](docs/decisions.md) : le journal des décisions, D-001 à D-048
   - [decision-log.md](docs/decision-log.md) : le premier récit des décisions, remplacé par decisions.md et conservé pour l'historique
   - [workflow.md](docs/workflow.md) : branches, contrôles, format des commits, hooks, permissions
   - [etl-plan.md](docs/etl-plan.md) : chaque commit prévu, avec son contrôle

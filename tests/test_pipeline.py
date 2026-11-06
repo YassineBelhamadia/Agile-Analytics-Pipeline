@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 from psycopg import sql
 
+from ingestion import load_staging as loader
 from ingestion.client import ExtractionError
 from ingestion.load_staging import StagingError
 from pipeline import completeness, run
@@ -372,3 +373,120 @@ def test_ctrl_c_exits_130_and_stops_the_mock_api(clone: int, tmp_path: Path) -> 
     assert "interrupted" in error
     assert not port_in_use(HOST, clone)
     assert not (tmp_path / "landing").exists()
+
+
+# --- SIGTERM: exit 143, with the Ctrl-C cleanup (D-048) ----------------------------------
+
+
+@pytest.fixture
+def runner(clone: int, tmp_path: Path):
+    """`python -m pipeline.run` in its own process group.
+
+    SIGTERM then reaches the runner alone, as a scheduler's would, which is the
+    case that used to leave the server running. Killing the group afterwards
+    means a failing test leaves no server behind.
+    """
+    process = subprocess.Popen(
+        [sys.executable, "-m", "pipeline.run", "--landing-dir", str(tmp_path / "landing"),
+         "--dbt-project-dir", str(copy_dbt_project(tmp_path / "dbt"))],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+    )
+    yield process
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def assert_no_process_left(process: subprocess.Popen) -> None:
+    with pytest.raises(ProcessLookupError):
+        os.killpg(process.pid, 0)
+
+
+@pytest.mark.postgres
+def test_sigterm_exits_143_and_stops_the_mock_api(clone: int, runner: subprocess.Popen, tmp_path: Path) -> None:
+    """SIGTERM to the runner alone, while the mock API is up."""
+    deadline = time.monotonic() + 30
+    while not port_in_use(HOST, clone) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert port_in_use(HOST, clone)
+
+    runner.send_signal(signal.SIGTERM)
+
+    # In this order: a server left running holds the output pipes open, so reading them first would only time out.
+    assert runner.wait(timeout=30) == run.EXIT_TERMINATED
+    assert not port_in_use(HOST, clone)
+    assert_no_process_left(runner)
+    assert "terminated by SIGTERM" in runner.communicate(timeout=30)[1]
+    assert not (tmp_path / "landing").exists() and not (tmp_path / ".landing.partial").exists()
+
+
+@pytest.mark.postgres
+def test_sigterm_during_the_dbt_build_exits_143_and_stops_dbt(runner: subprocess.Popen) -> None:
+    for line in runner.stdout:
+        if "Concurrency:" in line:  # dbt's own output: it is running, past start-up
+            break
+    runner.send_signal(signal.SIGTERM)
+    _, error = runner.communicate(timeout=30)
+    assert runner.returncode == run.EXIT_TERMINATED, error
+    assert_no_process_left(runner)
+
+
+@pytest.mark.postgres
+def test_a_signal_during_the_staging_load_rolls_back(clone: int, tmp_path: Path, monkeypatch, capsys) -> None:
+    """Terminated, while the tables are truncated and half refilled: every table keeps its previous rows."""
+    def copy_then_stop(conn, schema, table, rows, loaded_at):
+        if table.name == "issues":
+            raise run.Terminated
+        real_copy(conn, schema, table, rows, loaded_at)
+
+    real_copy = loader._copy_rows
+    monkeypatch.setattr(loader, "_copy_rows", copy_then_stop)
+    assert run_main(tmp_path) == run.EXIT_TERMINATED
+    assert all_counts(CLONE)["staging"] == EXPECTED
+
+
+def test_a_second_sigterm_cannot_interrupt_the_cleanup(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The second signal lands in a `finally`, where the mock API is being stopped. `main` restores the handler."""
+    cleaned = []
+
+    def signalled_twice(landing_dir, dbt_project_dir):
+        try:
+            signal.raise_signal(signal.SIGTERM)
+        finally:
+            signal.raise_signal(signal.SIGTERM)
+            cleaned.append(True)
+
+    before = signal.getsignal(signal.SIGTERM)
+    monkeypatch.setattr(run, "run_pipeline", signalled_twice)
+    assert run.main(["--landing-dir", str(tmp_path)]) == run.EXIT_TERMINATED
+    assert cleaned == [True]
+    assert signal.getsignal(signal.SIGTERM) is before
+
+
+# --- The target line (D-048) ---------------------------------------------------------------
+
+
+def target_line(database: str) -> str:
+    return f"Target database: {database} on {os.environ['POSTGRES_HOST']}:{os.environ['POSTGRES_PORT']}"
+
+
+@pytest.mark.postgres
+def test_the_target_line_comes_before_any_stage_and_never_shows_the_password(first_run) -> None:
+    result, _, _ = first_run
+    lines = result.stdout.splitlines()
+    assert lines[:2] == [target_line(DATABASE), f"--- {run.EXTRACTION}"]
+    assert lines.count(target_line(DATABASE)) == 1
+    assert os.environ["POSTGRES_PASSWORD"] not in result.stdout + result.stderr
+
+
+@pytest.mark.postgres
+def test_the_target_line_names_the_database_of_this_run_before_a_precondition_stops_it(clone: int, tmp_path: Path, capsys) -> None:
+    """A different database gives a different line, and it is printed even when the run writes nothing."""
+    with socket.socket() as listener:
+        listener.bind((HOST, clone))
+        listener.listen()
+        assert run_main(tmp_path) == run.EXIT_PRECONDITION
+    captured = capsys.readouterr()
+    assert captured.out.splitlines() == [target_line(CLONE)]
+    assert os.environ["POSTGRES_PASSWORD"] not in captured.out + captured.err
