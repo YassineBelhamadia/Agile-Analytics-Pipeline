@@ -123,7 +123,7 @@ Step 4.3 added 65 tests, for 226 in the project:
 
 ### Reconciliation with the answer key (pytest)
 
-`tests/test_metrics.py`. The expected side runs `compute_sprint_report` on `raw_data/`, loaded with `simulator.persistence.load_from_json`. Nothing comes from `mock_api/`, `ingestion/` or the warehouse. Both sides meet on team key and sprint name. The Postgres tests build into `marts_test` from `staging_test`, as in Session 3, and never touch the real schemas.
+`tests/test_metrics.py`. The expected side runs `compute_sprint_report` on `raw_data/`, loaded with `simulator.persistence.load_from_json`. Nothing comes from `mock_api/`, `ingestion/` or the warehouse. Both sides meet on team key and sprint name. The Postgres tests build into `marts_test` from `staging_test`, as in Session 3, and never touch the real schemas. Since step 5.2, the reconciliations that only read share one such build (`built_warehouse`, [D-045](../decisions.md#d-045-tests-that-only-read-share-one-warehouse-built-once)), which must pass `dbt build` in full. Sabotage runs keep their own.
 
 | Test | What it proves |
 |---|---|

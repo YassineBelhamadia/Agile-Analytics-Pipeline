@@ -87,6 +87,8 @@ Port 8000 (or the port of `AAP_API_BASE_URL`) must be free, so stop any mock API
 
 ## How it is verified
 
+### The pipeline (step 5.1)
+
 `uv run --env-file .env python -m pytest tests/test_pipeline.py -rs`: 24 tests, 0 skipped. They never touch `landing/`, `staging`, `stg` or `marts`. The first test creates a throwaway database, `aap_pipeline_test`, fills it with a real `python -m pipeline.run` and drops it at the end. Any test that changes data works on its own clone (`create database ... template ...`). dbt runs on a copy of `dbt/`.
 
 | Test | What it proves |
@@ -113,7 +115,40 @@ Port 8000 (or the port of `AAP_API_BASE_URL`) must be free, so stop any mock API
 - With `rpt_q1_velocity` broken by an unknown column: it keeps its oid and its 36 rows. Its downstream model `rpt_q6_team_portfolio` is skipped and keeps its oid. `dim_issue`, `rpt_q3_breach_rate` and `rpt_q5_bug_to_story_ratio` get new oids: models that don't depend on the failure are still rebuilt.
 - With a data test failing on `rpt_q1_velocity`: it has a **new** oid, because dbt had already replaced the table when the test ran. `rpt_q6_team_portfolio` keeps its old one.
 
-**Hooks.** `pipeline/` joined the pre-commit docs check: `sh scripts/test_hooks.sh` gives 30 passed. Without the hooks, 19 cases fail.
+### The mock API's verification scripts (step 5.2)
+
+`tests/test_mock_api_verify.py`: 4 tests. They need no server and no database. `mock_api.verify` and `mock_api.verify_app` still run on their own.
+
+| Test | What it proves |
+|---|---|
+| `test_verify_passes_on_the_ground_truth`, `test_verify_app_passes_on_the_ground_truth` | `main` returns 0 on the real `raw_data/` and prints its final `ALL ... PASSED` line. |
+| `test_sabotage_a_shifted_due_date_fails_verify` | **Sabotage:** due dates one day late in the serializer `mock_api.verify` uses. `main` returns 1 and prints `FAILED:`. |
+| `test_sabotage_a_dropped_field_fails_verify_app` | **Sabotage:** the app drops `customfield_10016`. Its responses no longer equal the serializer, and `main` returns 1. |
+
+`scripts/check_warehouse.py` has no wrapper: every Postgres test already connects through `connect_or_fail`, and `--persistence` restarts the container, which a test must never do.
+
+### The whole suite (step 5.2)
+
+```bash
+uv run --env-file .env python -m pytest -rs            # the gate: 132 tests, 0 skipped
+uv run --env-file .env python -m pytest -rs --reverse  # the same tests, backwards
+uv run python -m pytest -m "not postgres"              # the fast subset: no database, not a gate
+```
+
+Tests that only read share one warehouse, built once in its own database behind a read-only connection, and tests that change data keep their own schemas ([D-045](../decisions.md#d-045-tests-that-only-read-share-one-warehouse-built-once)).
+
+Measured on 2026-11-06 on one machine (WSL2, Postgres in Docker). The times depend on the machine.
+
+| Run | Tests | Result | Time |
+|---|---|---|---|
+| Full suite, before the shared build (after step 5.1) | 127 | 127 passed, 0 skipped | 431.75 s (7 min 12 s) |
+| Full suite, after it | 132 | 132 passed, 0 skipped | 338.97 s (5 min 39 s) |
+| Full suite, reverse order | 132 | 132 passed, 0 skipped | 330.36 s (5 min 30 s) |
+| Fast subset, no `POSTGRES_*` set | 56 | 56 passed, 76 deselected | 24.5 s |
+
+### Hooks
+
+`pipeline/` joined the pre-commit docs check: `sh scripts/test_hooks.sh` gives 30 passed. Without the hooks, 19 cases fail.
 
 ## Known limits
 

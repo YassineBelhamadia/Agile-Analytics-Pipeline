@@ -784,6 +784,32 @@ The narrative record of the early project decisions, with the full argument for 
   - `rpt_q3_breach_rate` is checked through its grand-total row and `rpt_q4_time_in_status` only for being non-empty: their row counts depend on which combinations have data.
 - **Source:** `pipeline/completeness.py`, `tests/test_pipeline.py`.
 
+## D-045: Tests that only read share one warehouse, built once
+
+- **Date:** 2026-11-06
+- **Decision:**
+  - `built_warehouse` (`tests/conftest.py`) builds the warehouse once per test session, in its own database, `aap_test_shared`, and hands out a read-only connection. The build must pass `dbt build` in full.
+  - Only tests that purely read use it: 11 tests (4 in `tests/test_dbt.py`, 7 in `tests/test_metrics.py`). Every test that changes data keeps its own schemas (`warehouse`) or its own database (`tests/test_pipeline.py`).
+  - `pytest -m "not postgres"` is the documented fast subset. It is not a gate.
+  - The gate is the full suite, and `--reverse` runs it backwards to prove no test depends on another.
+- **Context:**
+  - Measured on 2026-11-03: 103 tests in 359 s, of which the 30 slowest took 312 s.
+  - Every Postgres test dropped the test schemas, reloaded staging and ran dbt on the whole project, and about a dozen only read the result.
+- **Options considered:**
+  - **A build shared by the read-only tests** (chosen).
+  - **`dbt build --select` in sabotage tests.** Faster, but each test would depend on knowing the lineage, and a too-narrow selector could stop a sabotage reaching the test that should catch it.
+  - **A new `slow` marker.** Not needed: `-m "not postgres"` already is a fast subset.
+  - **Parallel tests (`pytest-xdist`).** A new dependency, and the tests that change data share schema names, so each worker would need its own set.
+  - **Where the shared build lives.** `marts_test` in the same database, as first planned, would be dropped by the first test using `warehouse`. A separate database keeps the same schema names, so the helpers that read them are unchanged, and tests that change data can't reach it.
+- **Why:** it removes the repeated work without weakening a check. The read-only connection enforces the rule, rather than trusting each test.
+- **Consequences:**
+  - Measured on 2026-11-06, on the same machine, with the same tests apart from those added by this step: 431.75 s before, 338.97 s after (127 and 132 tests), and 330.36 s in reverse order. The net saving is about 93 s, even though the five new tests add about 10 s.
+  - The suite is now 132 tests. Step 5.1 added 24 tests and about 90 s, which is why the time is close to the original 359 s.
+  - The fast subset is 56 tests in about 25 s, with no database.
+  - The build's pass/fail assertions moved from the tests into the fixture. If `dbt build` fails, all 11 tests error at once.
+  - CI, when it comes, should run the full suite: the reconciliation with `simulator/sprint_report.py` needs Postgres, and a subset would prove less than the README claims.
+- **Source:** `tests/conftest.py`, `tests/test_dbt.py` (`test_the_shared_warehouse_refuses_writes`).
+
 ## D-046: Exit codes by kind of failure, and each stage keeps its own guarantee
 
 - **Date:** 2026-11-06

@@ -345,6 +345,8 @@ Two scripts make up the suite:
 - `python -m mock_api.verify` checks the serializers against the ground truth.
 - `python -m mock_api.verify_app` checks the HTTP layer against the serializers, using FastAPI's `TestClient` on the real `raw_data/`.
 
+Both still run on their own, and `tests/test_mock_api_verify.py` runs them inside pytest, with one sabotage case each ([`etl/05-pipeline.md`](etl/05-pipeline.md#how-it-is-verified)).
+
 | # | Claim | Check |
 |---|---|---|
 | V1 | Every status in the data has an ID in `STATUS_IDS`; an unmapped status fails loudly. | `verify.check_status_coverage` |

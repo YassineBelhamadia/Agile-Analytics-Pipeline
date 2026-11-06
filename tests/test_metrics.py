@@ -22,8 +22,9 @@ counts, compared as fractions to 1e-12; float sums (capacity) to a relative
 1e-12, since Postgres and Python may add them in a different order.
 
 Sabotage runs edit a copy of dbt/ (`sabotaged_project`), never the real
-project. Postgres tests build into marts_test (fixtures from test_dbt); the
-real schemas are never touched.
+project. Tests that only read use `built_warehouse` (conftest.py), built once;
+sabotage runs build into marts_test (`warehouse`, from test_dbt). The real
+schemas are never touched.
 """
 
 from __future__ import annotations
@@ -42,8 +43,8 @@ from psycopg import sql
 
 from simulator.persistence import load_from_json
 from simulator.sprint_report import compute_sprint_report
-from test_dbt import DBT_DIR, MARTS, TEST_SCHEMA, failed_tests, run_dbt, run_then_test, warehouse  # noqa: F401
-from test_staging import RAW_DATA, landing  # noqa: F401  (fixture)
+from test_dbt import DBT_DIR, MARTS, TEST_SCHEMA, run_dbt, run_then_test, warehouse  # noqa: F401
+from test_staging import RAW_DATA
 
 SPRINT_BOUNDARY = time(9, 0)
 """Sprints start and end at 09:00 UTC on their dates (docs/domain-model.md, sprint metrics section)."""
@@ -163,12 +164,6 @@ def build_sabotaged(tmp_path: Path, model: str, replacements: dict[str, str]) ->
     assert result.returncode == 0, result.stdout
 
 
-def build(tmp_path: Path) -> None:
-    result = run_dbt(tmp_path, "build")
-    assert result.returncode == 0, result.stdout
-    assert failed_tests(tmp_path) == set()
-
-
 def test_answer_key_covers_every_sprint() -> None:
     reports = answer_key()
     assert len(reports) == 36
@@ -176,10 +171,9 @@ def test_answer_key_covers_every_sprint() -> None:
 
 
 @pytest.mark.postgres
-def test_sprint_metrics_match_sprint_report_for_every_sprint(warehouse, tmp_path: Path) -> None:
+def test_sprint_metrics_match_sprint_report_for_every_sprint(built_warehouse) -> None:
     """Every value sprint_report reports (committed, scope added, completed, hit, bug and issue counts), all 36 sprints."""
-    build(tmp_path)
-    expected, actual = answer_key(), warehouse_metrics(warehouse, MARTS)
+    expected, actual = answer_key(), warehouse_metrics(built_warehouse, MARTS)
     assert len(actual) == 36
     assert differences(expected, actual) == {}
 
@@ -321,9 +315,8 @@ def test_q1_late_points_are_the_documented_no_carryover_figures() -> None:
 
 
 @pytest.mark.postgres
-def test_q1_velocity_matches_raw_data(warehouse, tmp_path: Path) -> None:
-    build(tmp_path)
-    assert q1_differences(warehouse) == {}
+def test_q1_velocity_matches_raw_data(built_warehouse) -> None:
+    assert q1_differences(built_warehouse) == {}
 
 
 @pytest.mark.postgres
@@ -378,9 +371,8 @@ def test_raw_pto_never_exceeds_the_sprints_person_days() -> None:
 
 
 @pytest.mark.postgres
-def test_q2_velocity_vs_capacity_matches_raw_data(warehouse, tmp_path: Path) -> None:
-    build(tmp_path)
-    assert q2_differences(warehouse) == {}
+def test_q2_velocity_vs_capacity_matches_raw_data(built_warehouse) -> None:
+    assert q2_differences(built_warehouse) == {}
 
 
 @pytest.mark.postgres
@@ -499,10 +491,9 @@ def test_q3_raw_data_gives_the_documented_headline() -> None:
 
 
 @pytest.mark.postgres
-def test_q3_breach_rates_match_raw_data_and_the_headline(warehouse, tmp_path: Path) -> None:
-    build(tmp_path)
-    assert q3_differences(warehouse) == {}
-    assert headline(warehouse) == HEADLINE
+def test_q3_breach_rates_match_raw_data_and_the_headline(built_warehouse) -> None:
+    assert q3_differences(built_warehouse) == {}
+    assert headline(built_warehouse) == HEADLINE
 
 
 @pytest.mark.postgres
@@ -652,10 +643,9 @@ def test_q4_raw_histories_start_in_to_do_and_never_leave_done() -> None:
 
 
 @pytest.mark.postgres
-def test_q4_time_in_status_matches_raw_data(warehouse, tmp_path: Path) -> None:
+def test_q4_time_in_status_matches_raw_data(built_warehouse) -> None:
     """All 1,988 stays and all 16 statistic cells, with durations in calendar hours."""
-    build(tmp_path)
-    assert q4_differences(warehouse) == {}
+    assert q4_differences(built_warehouse) == {}
 
 
 @pytest.mark.postgres
@@ -722,9 +712,8 @@ def test_q5_periods_cover_every_created_issue() -> None:
 
 
 @pytest.mark.postgres
-def test_q5_bug_to_story_ratio_matches_raw_data(warehouse, tmp_path: Path) -> None:
-    build(tmp_path)
-    assert q5_differences(warehouse) == {}
+def test_q5_bug_to_story_ratio_matches_raw_data(built_warehouse) -> None:
+    assert q5_differences(built_warehouse) == {}
 
 
 @pytest.mark.postgres
@@ -799,9 +788,8 @@ def q6_differences(connection) -> dict:
 
 
 @pytest.mark.postgres
-def test_q6_portfolio_equals_the_q1_to_q5_values(warehouse, tmp_path: Path) -> None:
-    build(tmp_path)
-    assert q6_differences(warehouse) == {}
+def test_q6_portfolio_equals_the_q1_to_q5_values(built_warehouse) -> None:
+    assert q6_differences(built_warehouse) == {}
 
 
 @pytest.mark.postgres

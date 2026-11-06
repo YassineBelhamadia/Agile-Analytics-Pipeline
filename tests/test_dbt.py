@@ -6,7 +6,8 @@ schemas: staging is loaded into `staging_test`, and dbt builds into
 `stg_test` and `marts_test` through two vars, `staging_schema` and
 `schema_suffix` (dbt/macros/generate_schema_name.sql). Target and log files
 go to a temporary directory, so dbt/target/ is left alone. All three schemas
-are dropped before and after.
+are dropped before and after. Tests that only read use `built_warehouse`
+(conftest.py), which builds the same schemas once, in its own database.
 
 dbt runs with the temporary directory as its working directory. dbt-core 1.12
 loads a `.env` from the working directory (or a parent) by itself, without
@@ -29,7 +30,7 @@ import yaml
 from psycopg import sql
 
 from ingestion import load_staging as loader
-from test_staging import EXPECTED, RAW_DATA, TEST_SCHEMA, connect_or_fail, landing  # noqa: F401  (fixture)
+from test_staging import EXPECTED, RAW_DATA, TEST_SCHEMA, connect_or_fail
 
 DBT_DIR = Path(__file__).resolve().parent.parent / "dbt"
 DBT = Path(sys.executable).with_name("dbt")
@@ -177,16 +178,24 @@ def test_dbt_never_writes_outside_the_test_schemas(warehouse, tmp_path: Path) ->
     assert {s["schema"] for s in manifest["sources"].values()} == {TEST_SCHEMA}
 
 
+# --- The shared warehouse -----------------------------------------------------------
+
+
+@pytest.mark.postgres
+def test_the_shared_warehouse_refuses_writes(built_warehouse) -> None:
+    """D-045: only tests that purely read may share it, and a test that tried to write would fail here too."""
+    with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
+        built_warehouse.execute(sql.SQL("delete from {}").format(sql.Identifier(MARTS, "dim_team")))
+    assert counts(built_warehouse, MARTS, {"dim_team": 3}) == {"dim_team": 3}
+
+
 # --- Dimensions ------------------------------------------------------------------
 
 
 @pytest.mark.postgres
-def test_dimensions_build_with_the_shipped_counts_and_pass_their_tests(warehouse, tmp_path: Path) -> None:
-    result = run_dbt(tmp_path, "build")
-    assert result.returncode == 0, result.stdout
-    assert failed_tests(tmp_path) == set()
-    assert counts(warehouse, MARTS, DIMENSIONS) == DIMENSIONS
-    tables = warehouse.execute(
+def test_dimensions_build_with_the_shipped_counts_and_pass_their_tests(built_warehouse) -> None:
+    assert counts(built_warehouse, MARTS, DIMENSIONS) == DIMENSIONS
+    tables = built_warehouse.execute(
         "select table_name from information_schema.tables where table_schema = %s and table_type = 'BASE TABLE'",
         (MARTS,),
     ).fetchall()
@@ -194,12 +203,11 @@ def test_dimensions_build_with_the_shipped_counts_and_pass_their_tests(warehouse
 
 
 @pytest.mark.postgres
-def test_derived_user_teams_equal_raw_data(warehouse, tmp_path: Path) -> None:
+def test_derived_user_teams_equal_raw_data(built_warehouse) -> None:
     """The team derived from assigned issues (D-029) is each user's team in the simulator's ground truth."""
-    assert run_dbt(tmp_path, "run", "--select", "+dim_user", "+dim_team").returncode == 0
     team_keys = {t["team_id"]: t["key"] for t in json.loads((RAW_DATA / "teams.json").read_text())}
     expected = {u["display_name"]: team_keys[u["team_id"]] for u in json.loads((RAW_DATA / "users.json").read_text())}
-    derived = warehouse.execute(
+    derived = built_warehouse.execute(
         sql.SQL("select u.display_name, t.team_key from {} u join {} t using (team_id)").format(
             sql.Identifier(MARTS, "dim_user"), sql.Identifier(MARTS, "dim_team")
         )
@@ -279,11 +287,9 @@ def mart(table: str) -> sql.Identifier:
 
 
 @pytest.mark.postgres
-def test_facts_build_with_the_shipped_counts_and_join_all_four_dimensions(warehouse, tmp_path: Path) -> None:
-    result = run_dbt(tmp_path, "build")
-    assert result.returncode == 0, result.stdout
-    assert counts(warehouse, MARTS, FACTS) == FACTS
-    joined = warehouse.execute(
+def test_facts_build_with_the_shipped_counts_and_join_all_four_dimensions(built_warehouse) -> None:
+    assert counts(built_warehouse, MARTS, FACTS) == FACTS
+    joined = built_warehouse.execute(
         sql.SQL(
             "select count(*), count(distinct f.changelog_id) from {} f "
             "join {} i on i.issue_id = f.issue_id join {} t on t.team_id = f.team_id "
@@ -294,10 +300,9 @@ def test_facts_build_with_the_shipped_counts_and_join_all_four_dimensions(wareho
 
 
 @pytest.mark.postgres
-def test_event_sprint_is_the_window_that_contains_the_transition(warehouse, tmp_path: Path) -> None:
+def test_event_sprint_is_the_window_that_contains_the_transition(built_warehouse) -> None:
     """216 transitions happen after their issue's membership sprint ended; all of them land in a later sprint."""
-    assert run_dbt(tmp_path, "build").returncode == 0
-    rows = warehouse.execute(
+    rows = built_warehouse.execute(
         sql.SQL(
             "select count(*), count(*) filter (where f.transitioned_at >= ms.end_at and es.start_at >= ms.end_at) "
             "from {} f join {} m using (issue_id) join {} ms on ms.sprint_id = m.sprint_id "

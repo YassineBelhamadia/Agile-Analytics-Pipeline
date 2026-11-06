@@ -253,10 +253,11 @@ This check was carried over from Session 2. It lives in `tests/test_staging_reco
 
 ### pytest
 
-`uv run --env-file .env python -m pytest tests/test_dbt.py -rs`: 18 tests, 0 skipped.
+`uv run --env-file .env python -m pytest tests/test_dbt.py -rs`: 19 tests, 0 skipped.
 
 - **Isolation.** The Postgres tests load staging into `staging_test` and run dbt with the test vars, so dbt builds `stg_test` (and later `marts_test`). All three schemas are dropped before and after, and `staging`, `stg` and `marts` are never touched. dbt's target and log files go to a temporary directory.
 - **No `.env`.** dbt runs from that temporary directory, so it finds no `.env` and depends on the process environment alone.
+- **Built once for the tests that only read** (step 5.2, [D-045](../decisions.md#d-045-tests-that-only-read-share-one-warehouse-built-once)). The dimension, fact and window tests read `built_warehouse` (`tests/conftest.py`): the same schemas, built once, in a database of their own, through a read-only connection. Every test that changes data keeps the `warehouse` fixture and its own schemas.
 - **Sabotage runs** use `dbt run`, then `dbt test`, and compare the exact set of failed tests. `dbt build` skips everything downstream of a failing test. For example, a failed window test stops `fct_status_transitions` from being built, which is what the pipeline wants, but it would hide the other tests a sabotage should fail.
 
 | Test | What it proves |
@@ -266,6 +267,7 @@ This check was carried over from Session 2. It lives in `tests/test_staging_reco
 | `test_sabotage_a_wrong_credential_fails_dbt_debug_clearly` | **Sabotage:** a wrong `POSTGRES_PASSWORD` fails `dbt debug` with `password authentication failed`. Removing `POSTGRES_HOST` fails it with `Env var required but not provided: 'POSTGRES_HOST'`. |
 | `test_stg_views_build_count_and_survive_a_staging_reload` | `dbt run --select staging` creates exactly the 8 views, with the shipped counts. After a normal `load_staging`, the views are the same objects (same oids) with the same counts. |
 | `test_dbt_never_writes_outside_the_test_schemas` | With the test vars, every `staging/` model is in `stg_test`, every `marts/` model in `marts_test`, and the source in `staging_test`. |
+| `test_the_shared_warehouse_refuses_writes` | The shared build's connection rejects a delete, so a test on it can only read. |
 | `test_dimensions_build_with_the_shipped_counts_and_pass_their_tests` | A full `dbt build` passes with no failed test. The dimensions are tables with 3, 12, 36 and 530 rows. |
 | `test_derived_user_teams_equal_raw_data` | Each user's derived team is their team in `raw_data/users.json`, matched by display name and team key. |
 | `test_sabotage_a_deleted_staging_user_fails_the_user_relationships` | **Sabotage:** deleting "Phoenix Dev 1" from staging fails exactly the tests pointing at `dim_user`: issue assignee and reporter, transition author, the join to every dimension, and `dim_user`'s row count. After a reload, the build passes. |

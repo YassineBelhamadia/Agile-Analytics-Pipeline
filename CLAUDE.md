@@ -89,10 +89,10 @@ counts must match these. Staging also equals raw_data/ row by row (raw timestamp
 - Postgres up (postgres:18.6, localhost:5433, credentials from the root `.env`; copy `.env.example`):
   `docker compose --env-file .env -f warehouse/docker-compose.yml up -d --wait`
 - Postgres smoke check: `uv run --env-file .env python scripts/check_warehouse.py`; down: compose command with `down`, never `-v`
-- Extract (mock API running; `AAP_API_*` in `.env`, env vars only, D-025): `uv run --env-file .env python -m ingestion.extract`
-- Load staging: `uv run --env-file .env python -m ingestion.load_staging` (truncate + reload; `--rebuild` for schema changes)
+- Stages by hand: `uv run --env-file .env python -m ingestion.extract` (mock API running, env vars only, D-025), then `ingestion.load_staging` (`--rebuild` for schema changes)
 - dbt: `uv run --env-file .env dbt build --project-dir dbt --profiles-dir dbt` (or `debug`; dbt also reads `.env` itself, D-026)
-- Tests: `uv run --env-file .env python -m pytest -rs` (Postgres tests skip without `POSTGRES_*`; gates need 0 skipped)
+- Tests: `uv run --env-file .env python -m pytest -rs` (Postgres tests skip without `POSTGRES_*`; gates need 0 skipped; `--reverse` runs them backwards)
+- Fast subset, no database, not a gate: `uv run python -m pytest -m "not postgres"`. Only read-only tests may use `built_warehouse` (D-045).
 - Hooks: `sh scripts/test_hooks.sh`; enable once per clone (Yassine only): `git config core.hooksPath .githooks`
 
 ## Working rules

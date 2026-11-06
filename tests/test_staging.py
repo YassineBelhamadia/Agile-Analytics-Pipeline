@@ -21,15 +21,12 @@ from pathlib import Path
 
 import psycopg
 import pytest
-from fastapi.testclient import TestClient
 from psycopg import sql
 
 from ingestion import load_staging as loader
-from ingestion.client import JiraClient
-from ingestion.extract import MANIFEST, run_extraction
+from ingestion.extract import MANIFEST
 from ingestion import parse
 from ingestion.parse import ParseError, page_kind, parse_all, parse_timestamp, read_landing
-from mock_api.app import create_app
 
 RAW_DATA = Path(__file__).resolve().parent.parent / "raw_data"
 TEST_SCHEMA = "staging_test"
@@ -55,16 +52,6 @@ EXPECTED_TYPES = {
 # --- Fixtures and helpers -------------------------------------------------
 
 
-@pytest.fixture(scope="session")
-def landing(tmp_path_factory) -> Path:
-    if not RAW_DATA.is_dir():
-        pytest.fail(f"{RAW_DATA} is missing: run `uv run python scripts/generate_raw_data.py` first")
-    target = tmp_path_factory.mktemp("staging") / "landing"
-    with TestClient(create_app(RAW_DATA)) as app:
-        run_extraction(JiraClient(app, token="test-token", backoff_seconds=0), target)
-    return target
-
-
 @pytest.fixture
 def landing_copy(landing: Path, tmp_path: Path) -> Path:
     """A writable copy of the landing, for tests that damage it."""
@@ -85,6 +72,25 @@ def connect_or_fail() -> psycopg.Connection:
             f"`docker compose --env-file .env -f warehouse/docker-compose.yml up -d --wait`. ({exc})",
             pytrace=False,
         )
+
+
+def connect_to(database: str, **options) -> psycopg.Connection:
+    return psycopg.connect(
+        host=os.environ["POSTGRES_HOST"], port=os.environ["POSTGRES_PORT"], user=os.environ["POSTGRES_USER"],
+        password=os.environ["POSTGRES_PASSWORD"], dbname=database, autocommit=True, **options,
+    )
+
+
+def drop_database(name: str) -> None:
+    with connect_to("postgres") as admin:  # not POSTGRES_DB: a test may have pointed it at the database being dropped
+        admin.execute(sql.SQL("drop database if exists {} with (force)").format(sql.Identifier(name)))
+
+
+def recreate_database(name: str, template: str | None = None) -> None:
+    drop_database(name)
+    statement = "create database {}" + (" template {}" if template else "")
+    with connect_to("postgres") as admin:
+        admin.execute(sql.SQL(statement).format(*map(sql.Identifier, filter(None, (name, template)))))
 
 
 @pytest.fixture

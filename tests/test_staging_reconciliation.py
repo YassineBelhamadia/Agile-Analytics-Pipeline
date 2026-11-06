@@ -42,7 +42,7 @@ import pytest
 
 from ingestion import load_staging as loader
 from ingestion import parse
-from test_staging import RAW_DATA, TEST_SCHEMA, conn, landing, landing_copy  # noqa: F401  (fixtures)
+from test_staging import RAW_DATA, TEST_SCHEMA, conn, landing_copy  # noqa: F401  (fixtures)
 
 SPRINT_BOUNDARY = time(9, 0)
 """Sprints start and end at 09:00 UTC on their dates (docs/domain-model.md, sprint metrics section)."""

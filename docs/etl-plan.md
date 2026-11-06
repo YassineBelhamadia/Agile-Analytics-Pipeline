@@ -23,7 +23,7 @@ Rules for this file:
 | 4.2 | 4 | `feat(metrics): add business question models 1 to 3` | done |
 | 4.3 | 4 | `feat(metrics): add business question models 4 to 6` | done |
 | 5.1 | 5 | `feat(pipeline): add one-command pipeline run with completeness checks` | done |
-| 5.2 | 5 | `test(pipeline): add pytest wrappers for the mock API verify scripts` | proposed |
+| 5.2 | 5 | `test(pipeline): add pytest wrappers for the mock API verify scripts` | done |
 | 5.3 | 5 | `feat(metrics): flag rollup rows in breach rate and time in status` | proposed |
 | 5.4 | 5 | `ci: add GitHub Actions workflow with a Postgres service container` | proposed, first to cut |
 | 5.5 | 5 | `docs: finalize pipeline documentation and clean-run guide` | proposed |
@@ -476,8 +476,8 @@ Proposed here and approved on 2026-11-06. Each is recorded in [`decisions.md`](d
   - **C. A new `slow` marker** for a fast subset. Not needed: `-m "not postgres"` already is one (47 tests, 14 s, no database), it just isn't documented.
   - **D. Parallel tests** (`pytest-xdist`). A new dependency, and the Postgres tests share the schema names `staging_test`, `stg_test`, `marts_test`, so they would need one set of schemas per worker.
 - **Recommendation.**
-  - **Fix: A**, in step 5.2, with the runtime before and after recorded. Expected saving: about ten builds of about 10 s, so between 1.5 and 2 minutes. That is an estimate, measured at the step.
-  - **Fast subset:** document `-m "not postgres"` as the quick local check. It is not a gate.
+  - **Fix: A**, in step 5.2, with the runtime before and after recorded. Expected saving: about ten builds of about 10 s, so between 1.5 and 2 minutes. Measured at the step: about 93 s ([D-045](decisions.md#d-045-tests-that-only-read-share-one-warehouse-built-once)).
+  - **Fast subset:** document `-m "not postgres"` as the quick local check. It is not a gate. It grew to 56 tests and about 25 s with Session 5's tests.
   - **CI runs the full suite**, not a subset. The reconciliation with `simulator/sprint_report.py` is a Postgres test and is never cut, so a subset that skips it would make CI prove less than the README claims. A run of about 6 minutes per push is acceptable for one contributor.
 
 #### D-046: exit codes, and what a failed run leaves behind (step 5.1)
@@ -568,15 +568,17 @@ Runs extraction, staging load and dbt build from an empty database, starting and
 - **Goal.** `pytest` alone covers everything that verifies the project: the mock API's two scripts join the suite. The suite gets faster by building the test warehouse once for the tests that only read it, and the existing fast subset is documented (D-045).
 - **Scope.**
   - `tests/test_mock_api_verify.py` (new): calls `mock_api.verify.main()` and `mock_api.verify_app.main()` on `raw_data/`, asserts each returns 0 and prints its final `ALL ... PASSED` line.
-  - D-045's fix: a session-scoped fixture that builds `marts_test` once for the read-only tests. Sabotage tests keep the function-scoped `warehouse` fixture. No test's assertions change.
+  - D-045's fix: a session-scoped fixture that builds the warehouse once, in its own read-only database, for the tests that purely read. A shared `marts_test` in the main database would be dropped by the first `warehouse` test. Tests that change data keep their own schemas. The build's pass/fail assertions move into the fixture; the others don't change.
+  - A `--reverse` option, to run the suite backwards.
   - D-045's fast subset, `pytest -m "not postgres"`, documented. No new marker.
   - Dropped from the old outline: a wrapper for `scripts/check_warehouse.py`. Every Postgres test already connects through `connect_or_fail`, which fails with the same message when the server is down, and `--persistence` restarts the container, which a test must never do.
 - **Expected files.**
-  - `tests/test_mock_api_verify.py` (new); `tests/test_dbt.py`, `tests/test_metrics.py` (the shared fixture)
-  - `docs/etl/05-pipeline.md` ("How it is verified"), `docs/mock-api.md` (section 7, the scripts now also run under pytest), `docs/decisions.md` (D-045), this file
+  - `tests/test_mock_api_verify.py` (new), `tests/conftest.py` (new); `tests/test_dbt.py`, `tests/test_metrics.py`, `tests/test_staging.py`, `tests/test_staging_reconciliation.py`, `tests/test_pipeline.py` (the shared fixture and helpers)
+  - `docs/etl/05-pipeline.md` ("How it is verified"), `docs/etl/03-dbt-star-schema.md`, `docs/etl/04-metrics.md`, `docs/mock-api.md` (section 7, the scripts now also run under pytest), `docs/decisions.md` (D-045), this file, `CLAUDE.md`
 - **Gate.**
   - Both wrappers pass. `uv run python -m mock_api.verify` and `uv run python -m mock_api.verify_app` still run on their own and print the same last lines.
-  - The full suite passes, 0 skipped, with 4 more tests than after step 5.1 (2 wrappers, 2 sabotage cases). Its runtime is recorded before and after the fixture change, and is lower after.
+  - The full suite passes, 0 skipped, with 5 more tests than after step 5.1 (2 wrappers, 2 sabotage cases, the read-only guard). Its runtime is recorded before and after the fixture change, and is lower after.
+  - The full suite also passes in reverse order (`--reverse`), with the same counts.
   - The tests that move to the shared fixture keep their assertions unchanged (the diff shows fixture changes only), and every sabotage test still fails the check it targets, so sharing the build hides nothing.
   - `pytest -m "not postgres"` passes with no `POSTGRES_*` set, 0 skipped.
 - **Sabotage.**

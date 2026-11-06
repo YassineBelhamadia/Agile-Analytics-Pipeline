@@ -25,7 +25,6 @@ import sys
 import time
 from pathlib import Path
 
-import psycopg
 import pytest
 from psycopg import sql
 
@@ -34,7 +33,7 @@ from ingestion.load_staging import StagingError
 from pipeline import completeness, run
 from pipeline.mock_api_server import MockApiError, mock_api_server, port_in_use
 from test_dbt import DBT_DIR, DIMENSIONS, FACTS, counts
-from test_staging import EXPECTED, connect_or_fail
+from test_staging import EXPECTED, connect_or_fail, connect_to, drop_database, recreate_database
 
 DATABASE = "aap_pipeline_test"
 CLONE = f"{DATABASE}_clone"
@@ -52,25 +51,6 @@ def free_port() -> int:
     with socket.socket() as probe:
         probe.bind((HOST, 0))
         return probe.getsockname()[1]
-
-
-def connect_to(database: str, **options) -> psycopg.Connection:
-    return psycopg.connect(
-        host=os.environ["POSTGRES_HOST"], port=os.environ["POSTGRES_PORT"], user=os.environ["POSTGRES_USER"],
-        password=os.environ["POSTGRES_PASSWORD"], dbname=database, autocommit=True, **options,
-    )
-
-
-def drop_database(name: str) -> None:
-    with connect_to("postgres") as admin:  # not POSTGRES_DB: a test may have pointed it at the database being dropped
-        admin.execute(sql.SQL("drop database if exists {} with (force)").format(sql.Identifier(name)))
-
-
-def recreate_database(name: str, template: str | None = None) -> None:
-    drop_database(name)
-    statement = "create database {}" + (" template {}" if template else "")
-    with connect_to("postgres") as admin:
-        admin.execute(sql.SQL(statement).format(*map(sql.Identifier, filter(None, (name, template)))))
 
 
 def copy_dbt_project(target: Path) -> Path:
