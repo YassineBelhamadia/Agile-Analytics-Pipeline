@@ -207,8 +207,9 @@ models:
       Q3, deadline breach rate. Grain: one row per team_name x issue_type x
       commitment, plus rollup rows labelled "All teams", "All types" and "All".
       The headline by issue type is team_name = 'All teams' and commitment =
-      'All'. Rollup rows are totals: never sum across them. Combinations with
-      no due issue have no row. Page: docs/metrics/q3-breach-rate.md.
+      'All'. Rollup rows are totals: never sum across them. is_rollup = false
+      keeps the detail rows. Combinations with no due issue have no row. Page:
+      docs/metrics/q3-breach-rate.md.
     data_tests:
       - unique_combination:
           arguments:
@@ -225,6 +226,9 @@ models:
         data_tests: [not_null]
       - name: commitment
         description: committed, scope_added, or "All".
+        data_tests: [not_null]
+      - name: is_rollup
+        description: True on every row with a rollup label in any dimension (D-047). Filter to false before summing.
         data_tests: [not_null]
       - name: due_issue_count
         description: Issues with a due date in this cell, every outcome.

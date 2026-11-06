@@ -81,9 +81,10 @@ models:
   - name: rpt_q4_time_in_status
     description: >
       Q4, time per status. Grain: one row per team_name x status_name, plus
-      "All teams" rows (never sum across them). Mean, median and 90th
-      percentile of completed stays in calendar hours; open stays are counted
-      separately and never mixed in (D-040). Done is terminal and has no row.
+      "All teams" rows (never sum across them; is_rollup = false keeps the
+      team rows). Mean, median and 90th percentile of completed stays in
+      calendar hours; open stays are counted separately and never mixed in
+      (D-040). Done is terminal and has no row.
     data_tests:
       - expected_row_count:
           arguments:
@@ -97,6 +98,9 @@ models:
         data_tests: [not_null]
       - name: team_key
         description: Jira project key, or "ALL".
+        data_tests: [not_null]
+      - name: is_rollup
+        description: True on the "All teams" rows (D-047). Filter to false before summing.
         data_tests: [not_null]
       - name: status_name
         description: To Do, In Progress, Code Review or QA.

@@ -4,7 +4,8 @@
 
 **Models:**
 
-- `marts.rpt_q3_breach_rate`. **Grain:** one row per team × issue type × commitment, plus rollup rows labelled "All teams", "All types" and "All". 48 rows in the shipped data. The headline by issue type is `team_name = 'All teams'` and `commitment = 'All'`. Rollup rows are totals: filter to one level, never sum across levels.
+- `marts.rpt_q3_breach_rate`. **Grain:** one row per team × issue type × commitment, plus rollup rows labelled "All teams", "All types" and "All". 48 rows in the shipped data: 18 detail rows and 30 rollup rows, told apart by `is_rollup` ([D-047](../decisions.md#d-047-rollup-rows-carry-an-is_rollup-flag)). The headline by issue type is `team_name = 'All teams'` and `commitment = 'All'`. Rollup rows are totals: filter to one level, never sum across levels.
+  - **In the dashboard:** a visual that sums a count filters to `is_rollup = false`, where `due_issue_count` adds up to 320. A rate is never summed: a card or table showing one reads the row of its level (for example the headline row above).
 - `marts.rpt_q3_deadline_outcomes`. **Grain:** one row per issue with a due date (320), with its outcome, team, sprint (name and number) and commitment, for drill-down.
 - `marts.rpt_data_as_of`. One row: the instant open issues are measured at.
 
@@ -72,4 +73,5 @@ The deadline rule and the breach definition are those of [`../domain-model.md`](
 - `test_q3_breach_rates_match_raw_data_and_the_headline`: all 320 issue outcomes (type, team, sprint, commitment, outcome) and all 48 cells (six counts exact, both rates as fractions to 1e-12) match. The as-of instant equals the raw maximum floored to the millisecond. The warehouse headline is 20.4%, 28.9%, 38.8%.
 - `test_the_as_of_instant_follows_the_data`: moving one transition to 2024-07-06 12:00 UTC moves `rpt_data_as_of` to that instant.
 - **Sabotage:** `test_sabotage_q3_a_flipped_breach_comparison_fails`. Flipping `>` to `<=` turns the headline into 79.6%, 71.1%, 61.2% and changes the outcome of all 313 resolved issues.
-- dbt: `assert_breach_rate_rollups_add_up` checks that every rollup row is the sum of its parts along each dimension, and that the grand total is all 320 issues. Accepted-value tests cover `outcome` and `commitment`.
+- dbt: `assert_breach_rate_rollups_add_up` checks that every rollup row is the sum of its parts along each dimension, and that the grand total is all 320 issues. `assert_rollup_flag_matches_labels` checks that `is_rollup` is true exactly on the rows with a rollup label. Accepted-value tests cover `outcome` and `commitment`.
+- `test_is_rollup_splits_the_rows_and_the_detail_rows_add_up`: the flag splits the rows 18/30, and the detail rows add up to the 320 due issues.

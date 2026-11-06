@@ -4,7 +4,8 @@
 
 **Models:**
 
-- `marts.rpt_q4_time_in_status`. **Grain:** one row per team × status, plus "All teams" rows: 16 rows (4 working statuses × 3 teams + all). Rollup rows are not sums: filter to one level.
+- `marts.rpt_q4_time_in_status`. **Grain:** one row per team × status, plus "All teams" rows: 16 rows (4 working statuses × 3 teams + all): 12 team rows and 4 rollup rows, told apart by `is_rollup` ([D-047](../decisions.md#d-047-rollup-rows-carry-an-is_rollup-flag)). Rollup rows are not sums: filter to one level.
+  - **In the dashboard:** a comparison of teams filters to `is_rollup = false`, and an all-teams figure to `is_rollup = true`. Counts add up across teams, but a mean, median or p90 never does.
 - `marts.rpt_q4_status_stays`. **Grain:** one row per stay (`issue_id`, `stay_number`): 1,988 rows, with the team, and the sprint name and number of the issue's sprint (null for the 180 never-scheduled issues).
 
 ## Formula and data
@@ -43,7 +44,9 @@ Every issue's last stay has no next transition. There are three kinds:
 
 - `test_q4_time_in_status_matches_raw_data`: all 1,988 stays (team, status, visit, kind, duration or age), and all 16 cells (counts exact; mean, median, p90 and open age to 1e-9 h, below the data's 1 ms resolution).
 - `test_q4_raw_histories_start_in_to_do_and_never_leave_done`: the model's assumptions, on the raw side.
-- dbt: `assert_status_stays_chain_without_gaps` checks that each completed stay ends exactly where the next begins, that no duration is negative, and that each issue ends on an open or terminal stay.
+- dbt: `assert_status_stays_chain_without_gaps` checks that each completed stay ends exactly where the next begins, that no duration is negative, and that each issue ends on an open or terminal stay. `assert_rollup_flag_matches_labels` checks that `is_rollup` is true exactly on the "All teams" rows.
+- `test_is_rollup_splits_the_rows_and_the_detail_rows_add_up`: the flag splits the rows 12/4, and the team rows' `stay_count` adds up to the "All teams" rows.
+- **Sabotage:** `test_sabotage_all_teams_rows_not_flagged_fails_the_rollup_test`. Leaving the "All teams" rows unflagged fails the dbt test, and a sum over `is_rollup = false` doubles.
 - **Sabotage:** `test_sabotage_q4_starting_the_first_stay_at_the_first_transition_fails`. Starting the first stay at the first transition instead of at creation makes exactly the four To Do cells differ, and no other status.
 
 ## Example result (completed stays, calendar hours)

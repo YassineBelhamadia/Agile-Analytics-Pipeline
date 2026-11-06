@@ -43,7 +43,7 @@ from psycopg import sql
 
 from simulator.persistence import load_from_json
 from simulator.sprint_report import compute_sprint_report
-from test_dbt import DBT_DIR, MARTS, TEST_SCHEMA, run_dbt, run_then_test, warehouse  # noqa: F401
+from test_dbt import DBT_DIR, MARTS, TEST_SCHEMA, failed_tests, run_dbt, run_then_test, warehouse  # noqa: F401
 from test_staging import RAW_DATA
 
 SPRINT_BOUNDARY = time(9, 0)
@@ -520,6 +520,49 @@ def test_the_as_of_instant_follows_the_data(warehouse, tmp_path: Path) -> None:
     )
     assert run_dbt(tmp_path, "run").returncode == 0
     assert [r["as_of_at"] for r in read(warehouse, "rpt_data_as_of", "as_of_date").values()] == [later]
+
+
+# --- Step 5.3: rollup rows are flagged (D-047) -----------------------------------------
+
+ROLLUP_SPLIT = {"rpt_q3_breach_rate": {False: 18, True: 30}, "rpt_q4_time_in_status": {False: 12, True: 4}}
+"""Detail and rollup rows per table, from the group by cube and grouping sets (D-039, D-040)."""
+
+
+def rollup_split(connection, model: str) -> dict[bool, int]:
+    rows = connection.execute(
+        sql.SQL("select is_rollup, count(*) from {} group by is_rollup").format(sql.Identifier(MARTS, model))
+    ).fetchall()
+    return dict(rows)
+
+
+def detail_sum(connection, model: str, column: str) -> int:
+    return connection.execute(
+        sql.SQL("select sum({}) from {} where not is_rollup").format(sql.Identifier(column), sql.Identifier(MARTS, model))
+    ).fetchone()[0]
+
+
+@pytest.mark.postgres
+def test_is_rollup_splits_the_rows_and_the_detail_rows_add_up(built_warehouse) -> None:
+    assert {model: rollup_split(built_warehouse, model) for model in ROLLUP_SPLIT} == ROLLUP_SPLIT
+    assert detail_sum(built_warehouse, "rpt_q3_breach_rate", "due_issue_count") == 320
+    all_teams = built_warehouse.execute(
+        sql.SQL("select sum(stay_count) from {} where team_key = 'ALL'").format(sql.Identifier(MARTS, "rpt_q4_time_in_status"))
+    ).fetchone()[0]
+    assert detail_sum(built_warehouse, "rpt_q4_time_in_status", "stay_count") == all_teams
+
+
+@pytest.mark.postgres
+def test_sabotage_all_teams_rows_not_flagged_fails_the_rollup_test(warehouse, tmp_path: Path) -> None:
+    """Sabotage: the Q4 "All teams" rows are not flagged. The dbt test fails, and a sum over the detail rows doubles."""
+    project = sabotaged_project(tmp_path, "rpt_q4_time_in_status", {"grouping(team_name) = 1                                               as is_rollup": "false as is_rollup"})
+    assert run_dbt(tmp_path, "run", project_dir=project).returncode == 0
+    assert run_dbt(tmp_path, "test", "--select", "assert_rollup_flag_matches_labels", project_dir=project).returncode != 0
+    assert failed_tests(tmp_path) == {"assert_rollup_flag_matches_labels"}
+    assert rollup_split(warehouse, "rpt_q4_time_in_status") == {False: 16}
+    teams = warehouse.execute(
+        sql.SQL("select sum(stay_count) from {} where team_key <> 'ALL'").format(sql.Identifier(MARTS, "rpt_q4_time_in_status"))
+    ).fetchone()[0]
+    assert detail_sum(warehouse, "rpt_q4_time_in_status", "stay_count") == 2 * teams
 
 
 # --- Step 4.3: Q4 time per status --------------------------------------------------

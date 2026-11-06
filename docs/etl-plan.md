@@ -24,7 +24,7 @@ Rules for this file:
 | 4.3 | 4 | `feat(metrics): add business question models 4 to 6` | done |
 | 5.1 | 5 | `feat(pipeline): add one-command pipeline run with completeness checks` | done |
 | 5.2 | 5 | `test(pipeline): add pytest wrappers for the mock API verify scripts` | done |
-| 5.3 | 5 | `feat(metrics): flag rollup rows in breach rate and time in status` | proposed |
+| 5.3 | 5 | `feat(metrics): flag rollup rows in breach rate and time in status` | done |
 | 5.4 | 5 | `ci: add GitHub Actions workflow with a Postgres service container` | proposed, first to cut |
 | 5.5 | 5 | `docs: finalize pipeline documentation and clean-run guide` | proposed |
 
@@ -601,8 +601,8 @@ Runs mock_api.verify and mock_api.verify_app inside pytest, with a sabotage case
 - **Scope.** `is_rollup` on `rpt_q3_breach_rate` and `rpt_q4_time_in_status`, described in `_metrics__questions_1_3.yml` and `_metrics__questions_4_6.yml`, `not_null`, and a singular test that it is true exactly on rows with a rollup label. Row counts and every existing value are unchanged.
 - **Expected files.**
   - `dbt/models/metrics/rpt_q3_breach_rate.sql`, `dbt/models/metrics/rpt_q4_time_in_status.sql`, `dbt/models/metrics/_metrics__questions_1_3.yml`, `dbt/models/metrics/_metrics__questions_4_6.yml`, `dbt/tests/assert_rollup_flag_matches_labels.sql` (new)
-  - `tests/test_metrics.py` (Q3 and Q4 reconciliations also check the flag)
-  - `docs/etl/04-metrics.md`, `docs/metrics/q3-breach-rate.md`, `docs/metrics/q4-time-per-status.md`, `docs/decisions.md` (D-047), this file
+  - `tests/test_metrics.py` (new tests for the flag; the Q3 and Q4 reconciliations stay unchanged)
+  - `docs/etl/04-metrics.md`, `docs/metrics/q3-breach-rate.md`, `docs/metrics/q4-time-per-status.md`, `docs/metrics/README.md`, `docs/decisions.md` (D-047), this file, `CLAUDE.md`
 - **Gate.**
   - `dbt build` passes. The flag splits the rows 18/30 (Q3) and 12/4 (Q4).
   - Summing `due_issue_count` over `is_rollup = false` gives 320, the number of issues with a due date.

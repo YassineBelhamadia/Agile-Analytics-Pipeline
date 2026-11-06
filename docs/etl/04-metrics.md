@@ -48,9 +48,9 @@ Every model carries the team name, and the sprint name and number where its grai
 | `rpt_q1_velocity` | Q1 velocity | sprint | 36 | [q1-velocity.md](../metrics/q1-velocity.md) |
 | `rpt_q2_velocity_vs_capacity` | Q2 velocity against capacity | sprint | 36 | [q2-velocity-vs-capacity.md](../metrics/q2-velocity-vs-capacity.md) |
 | `rpt_q3_deadline_outcomes` | Q3 detail | issue with a due date | 320 | [q3-breach-rate.md](../metrics/q3-breach-rate.md) |
-| `rpt_q3_breach_rate` | Q3 breach rate | team × issue type × commitment, with "All" rollups | 48 | [q3-breach-rate.md](../metrics/q3-breach-rate.md) |
+| `rpt_q3_breach_rate` | Q3 breach rate | team × issue type × commitment, with "All" rollups (18 detail + 30 rollup rows, `is_rollup`) | 48 | [q3-breach-rate.md](../metrics/q3-breach-rate.md) |
 | `rpt_q4_status_stays` | Q4 detail | stay of an issue in a status | 1,988 | [q4-time-per-status.md](../metrics/q4-time-per-status.md) |
-| `rpt_q4_time_in_status` | Q4 time per status | team × status, with "All teams" rows | 16 | [q4-time-per-status.md](../metrics/q4-time-per-status.md) |
+| `rpt_q4_time_in_status` | Q4 time per status | team × status, with "All teams" rows (12 detail + 4 rollup rows, `is_rollup`) | 16 | [q4-time-per-status.md](../metrics/q4-time-per-status.md) |
 | `rpt_q5_bug_to_story_ratio` | Q5 bug-to-story ratio | team × two-week period (sprint window, plus "Before Sprint 1") | 39 | [q5-bug-to-story.md](../metrics/q5-bug-to-story.md) |
 | `rpt_q6_team_portfolio` | Q6 portfolio | team | 3 | [q6-portfolio.md](../metrics/q6-portfolio.md) |
 
@@ -121,6 +121,10 @@ Step 4.3 added 65 tests, for 226 in the project:
 - **`assert_status_stays_chain_without_gaps`:** each completed stay ends where the next starts, no duration is negative, and each issue ends on an open or terminal stay.
 - **`assert_q5_counts_every_created_issue`:** the Q5 periods hold every non-Epic issue exactly once.
 
+### Rollup rows are flagged (step 5.3)
+
+`rpt_q3_breach_rate` and `rpt_q4_time_in_status` are the only `rpt_` tables that mix totals with detail rows. Both carry `is_rollup`, so a BI tool can filter totals out before it sums ([D-047](../decisions.md#d-047-rollup-rows-carry-an-is_rollup-flag)). The row counts and every other value are unchanged. Step 5.3 added 3 tests, for 229 in the project: `not_null` on each flag, and `assert_rollup_flag_matches_labels`, which checks that the flag is true exactly on the rows with a rollup label. `dbt build` now gives `PASS=254` (8 views, 17 tables, 229 data tests).
+
 ### Reconciliation with the answer key (pytest)
 
 `tests/test_metrics.py`. The expected side runs `compute_sprint_report` on `raw_data/`, loaded with `simulator.persistence.load_from_json`. Nothing comes from `mock_api/`, `ingestion/` or the warehouse. Both sides meet on team key and sprint name. The Postgres tests build into `marts_test` from `staging_test`, as in Session 3, and never touch the real schemas. Since step 5.2, the reconciliations that only read share one such build (`built_warehouse`, [D-045](../decisions.md#d-045-tests-that-only-read-share-one-warehouse-built-once)), which must pass `dbt build` in full. Sabotage runs keep their own.
@@ -164,6 +168,8 @@ Sabotage runs edit a copy of the dbt project (`sabotaged_project`). Each edited 
 | `test_q5_bug_to_story_ratio_matches_raw_data` | all 39 rows against plain Python |
 | `test_sabotage_q5_counting_only_scheduled_issues_fails` | **Sabotage:** counting only scheduled issues (rejected by D-020) changes the counts and ratios |
 | `test_q6_portfolio_equals_the_q1_to_q5_values` | every Q6 value equals the Q1 to Q5 values, team by team |
+| `test_is_rollup_splits_the_rows_and_the_detail_rows_add_up` | added in step 5.3: the flag splits the rows 18/30 and 12/4, and the detail rows add up (320 due issues; the "All teams" `stay_count`) |
+| `test_sabotage_all_teams_rows_not_flagged_fails_the_rollup_test` | added in step 5.3. **Sabotage:** unflagged "All teams" rows fail `assert_rollup_flag_matches_labels`, and a sum over the detail rows doubles |
 | `test_sabotage_q6_averaging_the_sprint_ratios_fails` | **Sabotage:** a mean of sprint ratios makes `points_per_person_day` differ for all 3 teams, and nothing else |
 
 ### Gate run for step 4.3

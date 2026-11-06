@@ -3,9 +3,11 @@
 -- completed stays in calendar hours. Open stays are counted, with their median
 -- age at the as-of instant, but never mixed into the statistics: their
 -- durations are not known yet (D-040). Done is terminal and has no row.
+-- is_rollup = false keeps the team rows.
 select
     case when grouping(team_name) = 1 then 'All teams' else team_name end as team_name,
     case when grouping(team_name) = 1 then 'ALL' else team_key end        as team_key,
+    grouping(team_name) = 1                                               as is_rollup,
     status_name,
     status_order,
     count(*) filter (where stay_kind = 'completed')                         as stay_count,

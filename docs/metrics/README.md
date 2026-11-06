@@ -16,7 +16,7 @@ One page per question the dashboard answers. Each page states the question in pl
 
 - A documented grain, with the team name, and the sprint name and number where the grain has a sprint. No further joins in the BI tool.
 - Every model and column is described in `dbt/models/metrics/_metrics__*.yml`.
-- Rollup rows ("All teams", "All types", "All") are totals. Filter to one level and never sum across levels.
+- Rollup rows ("All teams", "All types", "All") are totals, in `rpt_q3_breach_rate` and `rpt_q4_time_in_status` only. `is_rollup = false` keeps the detail rows ([D-047](../decisions.md#d-047-rollup-rows-carry-an-is_rollup-flag)). Filter to one level and never sum across levels.
 
 **Limits shared by every question** ([`../domain-model.md`](../domain-model.md), "Known v1 limitations"):
 

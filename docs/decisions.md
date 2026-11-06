@@ -675,7 +675,8 @@ The narrative record of the early project decisions, with the full argument for 
 - **Why:** every slice the question needs is a filter on one table, and the headline is one row per type.
 - **Consequences:**
   - Summing across levels double-counts. The model description and the Q3 page say so.
-  - Cells with no due issue have no row (48 in the shipped data).
+  - Cells with no due issue would have no row. The shipped data has none missing: all 48 cells of (3 teams + all) × (3 types + all) × (2 commitments + all) exist.
+  - Rollup rows are flagged by `is_rollup` since [D-047](#d-047-rollup-rows-carry-an-is_rollup-flag).
 - **Source:** `dbt/models/metrics/rpt_q3_breach_rate.sql`, `rpt_q3_deadline_outcomes.sql`, `dbt/tests/assert_breach_rate_rollups_add_up.sql`.
 
 ## D-040: Time-based metrics use calendar hours, exclude Epics, and keep open stays out of the statistics
@@ -831,3 +832,25 @@ The narrative record of the early project decisions, with the full argument for 
     - The plan's table was incomplete on two points. Models that don't depend on the failure are still rebuilt, even if they run after it. And when a data test fails, the tested model is already rebuilt with this run's rows, and only what is downstream keeps its previous table.
   - The dashboard should only be refreshed after exit 0.
 - **Source:** `pipeline/run.py`; the failure table in [`etl/05-pipeline.md`](etl/05-pipeline.md#schema-or-contract).
+
+## D-047: Rollup rows carry an `is_rollup` flag
+
+- **Date:** 2026-11-06
+- **Decision:**
+  - `rpt_q3_breach_rate` and `rpt_q4_time_in_status` get a boolean `is_rollup`, true on every row with a rollup label in any dimension.
+  - The labels stay for display, and the row counts and every other value are unchanged.
+  - A dbt test checks that the flag is true exactly on the rows with a rollup label.
+- **Context:**
+  - These are the only two `rpt_` tables that mix totals with detail rows: 18 detail and 30 rollup rows in Q3 ([D-039](#d-039-breach-rates-ship-as-a-table-with-labelled-rollups-plus-an-issue-level-table)), 12 and 4 in Q4.
+  - A BI tool that sums a numeric column by default double-counts unless the report filters on the labels.
+- **Options considered:**
+  - **Keep the labels only,** and document the filter. A dashboard author who forgets it gets doubled sums, silently.
+  - **Split each table** into detail and totals models. Removing rows from an existing model breaks the dashboard contract ([D-033](#d-033-metrics-are-dbt-sql-models-built-as-tables-in-marts)), and Q3's seven rollup levels would need several models.
+  - **A text `row_level` column** naming the grouping. Precise for Q3's eight grouping sets, but a filter on free text is easier to get wrong than on a boolean.
+  - **A boolean `is_rollup`** (chosen).
+- **Why:** one filter that can't be misspelled, and adding a column breaks nothing.
+- **Consequences:**
+  - `is_rollup = false` gives rows that add up: `due_issue_count` sums to 320.
+  - A rate, mean or median is still never summed. A visual showing one reads the row of its level.
+  - `dbt build` goes from `PASS=251` to `PASS=254`: 3 more data tests, 229 in all.
+- **Source:** `dbt/models/metrics/rpt_q3_breach_rate.sql`, `rpt_q4_time_in_status.sql`, `dbt/tests/assert_rollup_flag_matches_labels.sql`.
