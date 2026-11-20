@@ -13,7 +13,7 @@ defensible in an interview, including the options we rejected.
 ## Read these first
 - `README.md` (English) and `README.fr.md` (French): public overview, headline results, quick start, status
 - `docs/workflow.md`: sessions, branches, gates, commit format, hooks, permissions; `docs/etl-plan.md`: every planned commit, gate and message
-- `docs/decisions.md`: decision log (`decision-log.md` is superseded, kept for history); `docs/etl/`: one page per stage; `docs/clean-run.md`: fresh clone to every count
+- `docs/decisions.md`: decision log (`decision-log.md` is superseded, kept for history); `docs/etl/`: one page per stage; `docs/clean-run.md`: fresh clone to every count; `docs/pipeline-walkthrough.md`: how data flows, file by file, with what is not verified
 - `docs/domain-model.md`: entities, relationships, sprint metric definitions, calibration, v1 limitations
 - `docs/mock-api.md`: endpoints, pagination, verified vs. assumed; `docs/stack.md`: tool choices, reasons, what is deferred
 
